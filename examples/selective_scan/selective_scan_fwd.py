@@ -4,8 +4,9 @@ import torch
 import hidet
 import numpy as np
 
+from hidet.ffi import runtime_api
 from hidet.ir.expr import Expr, symbol_var
-from hidet.ir.dtypes import DataType, data_type
+from hidet.ir.type import DataType, data_type
 from hidet.lang.types import i32, f16, f32
 from hidet.lang.cuda import blockIdx, threadIdx, cp_async_commit_group, cp_async_wait_group, syncthreads
 from hidet.lang import attrs, grid
@@ -18,7 +19,7 @@ from hidet.ir.cute.layout import TensorLayout
 from hidet.ir.cute.algorithm import auto_copy
 from hidet.ir.cute.ops import (cast, copy, fill, make_tensor, mask, mma,
                                partition_dst, partition_src, rearrange,
-                               tensor_view, reduce_sum, exp2, exp)
+                               tensor_view, reduce_sum, exp)
 
 
 LOG2E = np.log(2.0)
@@ -84,7 +85,7 @@ class SelectiveScanFn:
                      out: input_t[total_length, d],
                      query_start_loc: i32[batch_size + 1]):
                 attrs.func_kind = "cuda_kernel"
-                attrs.cuda.block_dim = 128
+                attrs.cuda.block_dim = 256
                 attrs.cuda.grid_dim = blocks_b * blocks_d
                 attrs.cuda.dynamic_smem_bytes = 0
 
@@ -116,12 +117,12 @@ class SelectiveScanFn:
                 tXrDeltaBias = partition_dst(rDeltaBias, auto_copy())
                 tXrD = partition_dst(rD, auto_copy())
 
-                rA = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 1, 0)), "register")
+                rA = make_tensor(weight_t, layout_auto((block_d, block_n, block_l), (1, 1, 0)), "register")
                 rU = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 0, 1)), "register")
                 rDelta = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 0, 1)), "register")
                 rB = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (0, 1, 1)), "register")
                 rC = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (0, 1, 1)), "register")
-                rZ = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (0, 1, 1)), "register")
+                rZ = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 0, 1)), "register")
 
                 sDelta = make_tensor(input_t, layout_auto((block_d, block_n, block_l, sP), (1, 0, 1, 1)), "shared")
                 sU = make_tensor(input_t, layout_auto((block_d, block_n, block_l, sP), (1, 0, 1, 1)), "shared")
@@ -137,10 +138,10 @@ class SelectiveScanFn:
                 tBsB = partition_dst(sB, auto_copy())
                 tCsC = partition_dst(sC, auto_copy())
 
-                tXsU = partition_dst(sU, auto_copy())
-                tXsDelta = partition_dst(sDelta, auto_copy())
-                tXsB = partition_dst(sB, auto_copy())
-                tXsC = partition_dst(sC, auto_copy())
+                tXsU = partition_src(sU, auto_copy())
+                tXsDelta = partition_src(sDelta, auto_copy())
+                tXsB = partition_src(sB, auto_copy())
+                tXsC = partition_src(sC, auto_copy())
 
                 tXrU = partition_dst(rU, auto_copy())
                 tXrDelta = partition_dst(rDelta, auto_copy())
@@ -168,11 +169,6 @@ class SelectiveScanFn:
                     tBgB = partition_src(gB, auto_copy())
                     tCgC = partition_src(gC, auto_copy())
 
-                    tUsU = partition_dst(sU, auto_copy())
-                    tDsDelta = partition_dst(sDelta, auto_copy())
-                    tBsB = partition_dst(sB, auto_copy())
-                    tCsC = partition_dst(sC, auto_copy())
-
                     smem_pipe_write = 0
                     smem_pipe_read = 0
                     
@@ -183,14 +179,13 @@ class SelectiveScanFn:
                         copy(auto_copy((block_d, block_n, block_l)), tCgC[:, :, :, j], tCsC[:, :, :, smem_pipe_write])
                         cp_async_commit_group()
                         smem_pipe_write += 1
-
+                    cp_async_wait_group(allow_on_fly_groups=sP - 2)
+                    syncthreads()
+ 
                     for j in range(blocks_l):
-                        cp_async_wait_group(allow_on_fly_groups=sP - 2)
-                        syncthreads()
-                        
                         copy(auto_copy((block_d, block_n, block_l)), tXgZ[:, :, :, j], tXrZ)
                         
-                        if j + sP < block_l:
+                        if j + sP < blocks_l:
                             copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, j + sP], tUsU[:, :, :, smem_pipe_write])
                             copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, j + sP], tDsDelta[:, :, :, smem_pipe_write])
                             copy(auto_copy((block_d, block_n, block_l)), tBgB[:, :, :, j + sP], tBsB[:, :, :, smem_pipe_write])
@@ -208,25 +203,30 @@ class SelectiveScanFn:
                         if smem_pipe_read == sP:
                             smem_pipe_read = 0
 
-                        delta = rDelta + rDeltaBias
-                        du = rD * rU
+                        t1 = rDelta + rDeltaBias # (d, n, l):(1, 0, 1)
+                        du = rD * rU # (d, n, l)
                         # delta_u = softplus(delta) * rU
-                        delta_u = delta * rU
-                        rALog2e = rA * LOG2E
-                        theta0 = delta * rALog2e
-                        theta1 = delta_u * rB
+                        delta_u = t1 * rU # (d, n, l)
+                        theta0 = t1 * rA * LOG2E # (d, n, l)
+                        theta1 = delta_u * rB # (d, n, l)
 
                         # (d, n, l)
                         # replace the sum with scan
+                        # scan = stack([theta0, theta1], axis=2)
+                        # scan = inclusive_scan(scan, axis=2, scan_op=)
+                        # scan = unpack(scan, axis=0)
                         scan = theta0 + theta1
                         scan1 = scan * rC
                         scan2 = du + reduce_sum(scan1, axis=1) # (d, n, l)
 
-                        scan3 = scan2 * rZ / (1 + exp(-rZ))
+                        a = rZ / (1 + exp(- 1.0 * rZ))
+                        scan3 = scan2 * a
 
-                        tXrScan = partition_src(scan3, auto_copy())
+                        tXrScan = partition_src(cast(scan3, input_t), auto_copy())
                         copy(auto_copy((block_d, block_n, block_l)), tXrScan, tXgOut[:, :, :, j])
 
+                        cp_async_wait_group(allow_on_fly_groups=sP - 2)
+                        syncthreads()
 
                         #scan = stack([tXrA, tXrB], axis=2)
                         #inclusive_scan(scan)
@@ -240,8 +240,11 @@ class SelectiveScanFn:
 
 
 if __name__ == "__main__":
+    hidet.option.cache_dir("./demo_selective_scan")
+    hidet.option.debug_cache_tuning(True)
+    hidet.option.save_lower_ir(True)
     batch_size = 50
-    seqlen = 1321
+    seqlen = 1280
     d = 5120
     n = 32
     input_t = "float16"
@@ -251,8 +254,30 @@ if __name__ == "__main__":
     u, delta, A, B, C, D, z, delta_bias = data(d, n, total_length, input_t, weight_t)
 
     fn = SelectiveScanFn(dims=d, dstate=n, input_t=input_t, weight_t=weight_t)
-    block_d = 16
-    block_l = 256
+    block_d = 32
+    block_l = 32
     block_n = 32
-    sP = 2
-    fn.scan_fwd(block_d, block_l, block_n, sP)
+    sP = 7
+    func = fn.scan_fwd(block_d, block_l, block_n, sP)
+    query_start_loc = torch.zeros((batch_size + 1), dtype=torch.int32, device="cuda")
+    query_start_loc[0] = 0
+    for i in range(batch_size):
+        query_start_loc[i + 1] = query_start_loc[i] + seqlen
+    
+    runtime_api.set_symbol_value("batch_size", batch_size)
+    runtime_api.set_symbol_value("total_length", total_length)
+    out = torch.randn((total_length, d), dtype=torch.float16, device="cuda")
+    func(u, delta, A, B, C, D, z, delta_bias, out, query_start_loc)
+
+    from hidet.utils.benchmark import do_bench
+    def fn():
+        func(u, delta, A, B, C, D, z, delta_bias, out, query_start_loc)
+    time = do_bench(fn, percentiles=None)
+    memory_total = total_length * d * 4 * torch.float16.itemsize + total_length * n * 2 * torch.float16.itemsize + d * n * torch.float32.itemsize + d * 2 * torch.float32.itemsize
+    print(f"selective scan time: {time} ms, memory bandwidth: {memory_total / time / 1e6} GB/s")
+
+
+    def fn1():
+        u1 = u.transpose(0, 1).contiguous()
+    time = do_bench(fn1, percentiles=None)
+    print(f"transpose u time: {time} ms")
