@@ -19,7 +19,7 @@ from hidet.ir.cute.layout import TensorLayout
 from hidet.ir.cute.algorithm import auto_copy
 from hidet.ir.cute.ops import (cast, copy, fill, make_tensor, mask, mma,
                                partition_dst, partition_src, rearrange,
-                               tensor_view, reduce_sum, exp)
+                               tensor_view, reduce_sum, exp, softplus, silu)
 
 
 LOG2E = np.log(2.0)
@@ -70,6 +70,7 @@ class SelectiveScanFn:
         blocks_n = cdiv(n, block_n)
         MAX_SEQLEN = 16384
         padded_seqlen = block_l * cdiv(MAX_SEQLEN, block_l)
+        unroll = "u{}".format(sP)
 
         with hidet.script_module() as script_module:
         
@@ -145,6 +146,7 @@ class SelectiveScanFn:
 
                 tXrU = partition_dst(rU, auto_copy())
                 tXrDelta = partition_dst(rDelta, auto_copy())
+                tXrA = partition_dst(rA, auto_copy())
                 tXrB = partition_dst(rB, auto_copy())
                 tXrC = partition_dst(rC, auto_copy())
 
@@ -161,7 +163,6 @@ class SelectiveScanFn:
                                      TensorLayout((block_d, block_n, padded_seqlen), (0, 1, n)), "global")
 
                     tXgA = partition_src(gA, auto_copy())
-                    tXrA = partition_dst(rA, auto_copy())
                     copy(auto_copy((block_d, block_n, block_l)), tXgA, tXrA)
 
                     tUgU = partition_src(gU, auto_copy())
@@ -184,7 +185,7 @@ class SelectiveScanFn:
  
                     for j in range(blocks_l):
                         copy(auto_copy((block_d, block_n, block_l)), tXgZ[:, :, :, j], tXrZ)
-                        
+
                         if j + sP < blocks_l:
                             copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, j + sP], tUsU[:, :, :, smem_pipe_write])
                             copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, j + sP], tDsDelta[:, :, :, smem_pipe_write])
@@ -203,24 +204,24 @@ class SelectiveScanFn:
                         if smem_pipe_read == sP:
                             smem_pipe_read = 0
 
-                        t1 = rDelta + rDeltaBias # (d, n, l):(1, 0, 1)
-                        du = rD * rU # (d, n, l)
-                        # delta_u = softplus(delta) * rU
-                        delta_u = t1 * rU # (d, n, l)
-                        theta0 = t1 * rA * LOG2E # (d, n, l)
+                        t1 = softplus(rDelta + rDeltaBias) # (d, n, l):(1, 0, 1)
+                        delta_u = t1 * rU
+                        theta0 = exp(t1 * rA) # (d, n, l)
                         theta1 = delta_u * rB # (d, n, l)
-
                         # (d, n, l)
                         # replace the sum with scan
                         # scan = stack([theta0, theta1], axis=2)
                         # scan = inclusive_scan(scan, axis=2, scan_op=)
                         # scan = unpack(scan, axis=0)
                         scan = theta0 + theta1
+                        
                         scan1 = scan * rC
-                        scan2 = du + reduce_sum(scan1, axis=1) # (d, n, l)
+                        yc = reduce_sum(scan1, axis=1)
+                        
+                        du = rD * rU # (d, n, l)
+                        scan2 = du + yc # (d, n, l)
 
-                        a = rZ / (1 + exp(- 1.0 * rZ))
-                        scan3 = scan2 * a
+                        scan3 = scan2 * silu(rZ)
 
                         tXrScan = partition_src(cast(scan3, input_t), auto_copy())
                         copy(auto_copy((block_d, block_n, block_l)), tXrScan, tXgOut[:, :, :, j])
@@ -244,7 +245,7 @@ if __name__ == "__main__":
     hidet.option.debug_cache_tuning(True)
     hidet.option.save_lower_ir(True)
     batch_size = 50
-    seqlen = 1280
+    seqlen = 1408
     d = 5120
     n = 32
     input_t = "float16"

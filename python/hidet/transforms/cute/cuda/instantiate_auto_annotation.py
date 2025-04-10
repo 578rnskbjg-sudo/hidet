@@ -215,6 +215,7 @@ from hidet.ir.expr import Var, Expr, var, is_constant
 from hidet.ir.tools import TypeInfer, infer_type
 from hidet.ir.functors import IRVisitor, IRRewriter
 
+from hidet.ir.cute.int_tuple import is_tuple
 from hidet.ir.cute.expr import Op, CallOp
 from hidet.ir.cute.type import TiledTensorType, LogicalEncoding, logical_encoding
 
@@ -1701,7 +1702,7 @@ class MemoryConstraintsUnifier:
         shape = []
         stride = []
         for s, d in zip(flat_shape, flat_stride):
-            if is_constant(d):
+            if is_constant(d) and d != 0:
                 shape.append(s)
                 stride.append(d)
         if len(shape) == 0:
@@ -1732,8 +1733,7 @@ class MemoryConstraintsUnifier:
         from hidet.ir.cute import shape_div
 
         flat_shape = list(flatten(layout_hint.shape_tuple))
-        # TODO: handle broadcast
-        # flat_stride = list(flatten(layout_hint.stride_tuple))
+        flat_stride = list(flatten(layout_hint.stride_tuple))
         val = coalesce(val)
         val_shape = val.shape_tuple
         val_stride = val.stride_tuple
@@ -1742,6 +1742,8 @@ class MemoryConstraintsUnifier:
         strides = []
         current_idx = 1
         for d, s, d1 in sorted(zip(val_stride, val_shape, cont_stride)):
+            if d == 0:
+                continue
             if d > current_idx:
                 s1 = shape_div(d, current_idx)
                 shapes.append(s1)
@@ -1800,6 +1802,17 @@ class MemoryConstraintsUnifier:
             result_shape.append(flat_shape[i])
             result_stride.append(var("v"))
             i = i + 1
+        assert len(result_stride) == len(flat_stride)
+        for i, (x, y) in enumerate(zip(flat_stride, result_stride)):
+            if is_constant(x) and x == 0:
+                if is_tuple(y):
+                    if any(is_constant(d) and d != 0 for d in y):
+                        return None
+                    result_stride[i] = tuple(0 for _ in y)
+                elif not is_constant(y):
+                    result_stride[i] = 0
+                elif y != 0:
+                    return None
         return TensorLayout(tuple(result_shape), tuple(result_stride))
 
 
@@ -1807,7 +1820,9 @@ def infer_memory_constraints(ctx: InferContext, tensor_info: TensorInfo, value: 
     tensor = tensor_info.tensor
     tensor_memory = tensor_info.layout
     tensor_memory_constraints = ctx.solution.get(tensor, None)
-    value_inst, _ = group(value, elements_per_inst)
+    value_inst, _ = group(value, elements_per_inst, filter_zero=False)
+    if value_inst is None:
+        return None
     unifier = MemoryConstraintsUnifier()
     memory_constraints = unifier.infer(tensor_memory, value_inst)
     memory_constraints = unifier.unify(memory_constraints, tensor_memory_constraints)
@@ -2276,7 +2291,39 @@ class ReduceInferRules(InferRules):
             out_tv = make_layout(thrd, val)
             return [infer_result(logical_encoding(shp, out_tv))]
 
-        self.update_infer_rules("i2o", infer_output)
+        # TODO: check if this function is safe or not
+        def infer_input(
+            op: Reduce,
+            args: List[LogicalEncoding],
+            ctx: InferContext,
+            input_vars: Optional[List[Var]] = None,
+            output_var: Optional[Var] = None,
+        ):
+            enc = args[0]
+            shp = enc.shape
+            tv = enc.layout
+            thrd, val = tv
+            axis = op.axis
+            stride = compact_col_major(shp)
+            current_idx = stride[axis]
+            def process_layout(layout, current_idx):
+                shape = []
+                stride = []
+                for s, d in zip(flatten(layout.shape_tuple), flatten(layout.stride_tuple)):
+                    if d == 0:
+                        shape.append(s)
+                        stride.append(current_idx)
+                        current_idx *= s
+                    else:
+                        shape.append(s)
+                        stride.append(d)
+                return current_idx, TensorLayout(tuple(shape), tuple(stride))
+            current_idx, thrd = process_layout(thrd, current_idx)
+            current_idx, val = process_layout(val, current_idx)
+            tv = make_layout(thrd, val)
+            return [infer_result(logical_encoding(shp, tv))]
+
+        self.update_infer_rules("i2o", infer_output).update_infer_rules("o2i", infer_input)
 
 
 @register_infer_rules(Arithmetic)
@@ -2495,6 +2542,7 @@ class ResolveAuto(IRVisitor):
         elif isinstance(op, Reduce):
             out_var = self.op2vars[op][-1]
             self.constraints.append(make_constraint([op.x], out_var, op, "i2o"))
+            self.constraints.append(make_constraint([out_var], op.x, op, "o2i"))
         elif isinstance(op, Arithmetic):
             vars = self.op2vars[op]
             narity = len(self.op2vars[op])
@@ -3255,10 +3303,12 @@ class ResolveAuto(IRVisitor):
                 assert dst_ty.scope.is_global()
                 dst_tensor = self.var2tensor[op.dst]
                 gmem = dst_tensor.layout
-            if is_surjective(gmem):
-                return 0
-            else:
-                return 1
+            gmem = coalesce(gmem)
+            copied_size = 1
+            for s, d in zip(gmem.shape_tuple, gmem.stride_tuple):
+                if d != 0:
+                    copied_size *= s
+            return -copied_size * src_ty.dtype.nbits // 8
 
         unresolved_copys = sorted(unresolved_copys, key=g)
         if len(unresolved_copys) > 0:

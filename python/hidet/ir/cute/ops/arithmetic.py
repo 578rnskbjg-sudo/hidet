@@ -13,7 +13,7 @@ from typing import Union, List, Callable, Any, Tuple, Dict
 from functools import partial
 
 from hidet.ir.type import BaseType, DataType, TensorType, TensorPointerType, FuncType, void
-from hidet.ir.expr import Expr, Var, Constant, PyScalar, var, convert
+from hidet.ir.expr import Expr, Var, Constant, PyScalar, var, convert, if_then_else
 from hidet.ir.func import Function
 
 from hidet.ir.cute.layout import (
@@ -454,6 +454,19 @@ class Relu(UnaryOp):
         return ir_relu
 
 
+class Softplus(UnaryOp):
+    def scalar_op(self):
+        from hidet.ir.primitives import math
+        
+        def ir_softplus(x):
+            from hidet.ir.tools import infer_type
+
+            dtype = infer_type(x)
+            return if_then_else(x <= dtype(20.0), math.log1p(math.exp2(x)), x)
+
+        return ir_softplus
+
+
 class Silu(UnaryOp):
     def scalar_op(self):
         from hidet.ir.primitives import math
@@ -516,6 +529,10 @@ def relu(x: Expr):
 
 def exp(x: Expr):
     return Exp(x).make_call()
+
+
+def softplus(x: Expr):
+    return Softplus(x).make_call()
 
 
 def silu(x: Expr):

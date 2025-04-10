@@ -64,6 +64,7 @@ from .arithmetic import (
     elementwise_min,
     Fill,
     fill,
+    softplus,
 )
 from .mma import Mma, mma, WgmmaFenceOperand, wgmma_fence_operand
 from .subtensor import SubTensor, sub_tensor
