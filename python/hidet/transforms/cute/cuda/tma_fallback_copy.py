@@ -283,8 +283,6 @@ class TmaFallbackCopyRewriter(IRRewriter):
                     tile_shape = x_ty.layout[0].shape_tuple
                     tile_shape = product_each(tile_shape)
                     rank = len(tile_shape)
-                    # TODO: FIXME currently it's a hack
-                    rank = 2
                     crd_layout = TensorLayout(x_ty.layout[rank:].shape_tuple)
                     crd = op.coord[rank:]
                     self.var2coordinates[stmt.var] = src_coords[:-1] + [

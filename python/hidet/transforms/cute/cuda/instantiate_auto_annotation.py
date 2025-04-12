@@ -265,9 +265,12 @@ from hidet.ir.cute.ops import (
     Transpose,
     Atomic,
     MBarriers,
+    Pack,
+    GetItem,
+    InclusiveScan,
 )
 from hidet.ir.cute.algorithm import TiledCopy, TiledMma, is_auto_copy, is_auto_mma
-from hidet.ir.cute import coalesce, composition, left_inverse, make_layout, product_each
+from hidet.ir.cute import coalesce, composition, left_inverse, make_layout, product_each, product, common_reshape
 from hidet.transforms.cute.analysis import TensorAliasAnalysis, TensorInfo
 
 from hidet.logging import logger, stderr_handler, setConsoleLevel, DEBUG
@@ -479,6 +482,28 @@ class MarkUnresolved(IRVisitor):
         else:
             self.ops_resolved.append(e)
         self.op2vars[e] = [e.src, e.dst]
+
+    def visit_Pack(self, e: Pack):
+        if any(is_auto_layout(self.infer_type(i).layout) for i in e.args):
+            self.ops_unresolved.append(e)
+        else:
+            self.ops_resolved.append(e)
+        self.op2vars[e] = [i for i in e.args]
+
+    def visit_GetItem(self, e: GetItem):
+        self.visit(e.x)
+        if is_auto_layout(self.infer_type(e.x).layout):
+            self.ops_unresolved.append(e)
+        else:
+            self.ops_resolved.append(e)
+        self.op2vars[e] = [e.x]
+
+    def visit_InclusiveScan(self, e: InclusiveScan):
+        if e.tiled_layout is None and is_auto_layout(self.infer_type(e.x).layout):
+            self.ops_unresolved.append(e)
+        else:
+            self.ops_resolved.append(e)
+        self.op2vars[e] = [e.x, e.init]
 
 
 class InferLogicalShape(IRVisitor):
@@ -747,7 +772,7 @@ class InferLogicalShape(IRVisitor):
     def visit_TensorView(self, op: TensorView):
         self.visit_TensorBase(op)
 
-    def visit_Arithmetic(self, op: Arithmetic):
+    def visit_Elementwise(self, op: Union[Arithmetic, Pack, GetItem]):
         vars = self.op2vars[op]
         shape = None
         for v in vars:
@@ -758,6 +783,18 @@ class InferLogicalShape(IRVisitor):
                 self._update_var_shape(v, shape)
         if all(self._shape_resolved(self._get_var_shape(v)) for v in vars):
             self.ops_resolved.append(op)
+
+    def visit_Arithmetic(self, op: Arithmetic):
+        self.visit_Elementwise(op)
+
+    def visit_Pack(self, op: Pack):
+        self.visit_Elementwise(op)
+
+    def visit_GetItem(self, op: GetItem):
+        self.visit_Elementwise(op)
+
+    def visit_InclusiveScan(self, op: InclusiveScan):
+        self.visit_Elementwise(op)
 
     def visit_Reduce(self, op: Reduce):
         vars = self.op2vars[op]
@@ -968,10 +1005,9 @@ class InferLogicalLayout(IRVisitor):
             return None
 
     def _infer_layout(
-        self, in_shape: Tuple[int], out_shape: Tuple[int], in_layout: TensorLayout, out_layout: TensorLayout
+        self, in_shape: Tuple[int], out_shape: Tuple[int], in_layout: Union[TensorLayout, None], out_layout: Union[TensorLayout, None]
     ):
-        from hidet.ir.cute.layout import common_reshape
-
+        updated = False
         if in_layout is not None:
             if out_layout is not None:
                 inlayout, outlayout = common_reshape(in_layout, out_layout)
@@ -989,19 +1025,24 @@ class InferLogicalLayout(IRVisitor):
                             assert di == do
                         else:
                             outstride[i] = di
+                            updated = True
                     else:
                         if is_constant(do):
                             instride[i] = do
+                            updated = True
                 inlayout = TensorLayout(inshape, tuple(instride))
                 outlayout = TensorLayout(outshape, tuple(outstride))
                 in_layout = composition(inlayout, TensorLayout(in_shape))
                 out_layout = composition(outlayout, TensorLayout(out_shape))
+                updated = True
             else:
                 out_layout = composition(in_layout, TensorLayout(out_shape))
+                updated = True
         else:
             if out_layout is not None:
                 in_layout = composition(out_layout, TensorLayout(in_shape))
-        return in_layout, out_layout
+                updated = True
+        return in_layout, out_layout, updated
 
     def _identical_io(self, op: Op):
         vars = self.op2vars[op]
@@ -1011,7 +1052,7 @@ class InferLogicalLayout(IRVisitor):
         out_shape = self.var2shape[out_var]
         in_layout = self._get_var_layout(in_var)
         out_layout = self._get_var_layout(out_var)
-        in_layout, out_layout = self._infer_layout(in_shape, out_shape, in_layout, out_layout)
+        in_layout, out_layout, _ = self._infer_layout(in_shape, out_shape, in_layout, out_layout)
         self._update_var_layout(in_var, in_layout)
         self._update_var_layout(out_var, out_layout)
         if self._layout_resolved(in_layout) and self._layout_resolved(out_layout):
@@ -1152,6 +1193,34 @@ class InferLogicalLayout(IRVisitor):
     def visit_TensorView(self, op: TensorView):
         self.visit_TensorBase(op)
 
+    def visit_GetItem(self, op: GetItem):
+        self._identical_io(op)
+
+    def visit_Pack(self, op: Pack):
+        vars = self.op2vars[op]
+        inputs = vars[:-1]
+        out_var = vars[-1]
+        inferable = True
+        layout = None
+        for inp in inputs:
+            inp_layout = self._get_var_layout(inp)
+            if inp_layout is not None and self._layout_resolved(inp_layout):
+                layout = inp_layout
+                inferable = True
+                break
+        if inferable:
+            for inp in inputs:
+                inp_shape = self.var2shape[inp]
+                inp_layout = self._get_var_layout(inp)
+                inp_layout, _, _ = self._infer_layout(inp_shape, inp_shape, inp_layout, layout)
+                self._update_var_layout(inp, inp_layout)
+            out_layout = self._get_var_layout(out_var)
+            out_shape = self.var2shape[out_var]
+            out_layout, _, _ = self._infer_layout(out_shape, out_shape, out_layout, layout)
+            self._update_var_layout(out_var, out_layout)
+        if all(self._layout_resolved(self._get_var_layout(v)) for v in vars):
+            self.ops_resolved.append(op)
+
     def visit_Arithmetic(self, op: Arithmetic):
         from hidet.ir.cute.ops.arithmetic import broadcast_layout
 
@@ -1171,26 +1240,22 @@ class InferLogicalLayout(IRVisitor):
             out_layout1 = broadcast_layout(inp_layouts)
             out_layout = self._get_var_layout(out_var)
             out_shape = self.var2shape[out_var]
-            out_layout, out_layout1 = self._infer_layout(out_shape, out_shape, out_layout, out_layout1)
+            out_layout, out_layout1, _ = self._infer_layout(out_shape, out_shape, out_layout, out_layout1)
             self._update_var_layout(out_var, out_layout)
         if all(self._layout_resolved(self._get_var_layout(v)) for v in vars):
             self.ops_resolved.append(op)
 
-    def visit_Reduce(self, op: Reduce):
-        from hidet.ir.cute import product
-
-        vars = self.op2vars[op]
-        in_var, out_var = vars
+    def _unify_reduce_layout(self, in_var: Var, reduce_var: Var, axis: int):
         in_layout = self._get_var_layout(in_var)
-        out_layout = self._get_var_layout(out_var)
+        out_layout = self._get_var_layout(reduce_var)
+        updated = False
         if in_layout is not None:
-            shape = self.var2shape[out_var]
-            ax = op.axis
-            assert 0 <= ax < len(shape)
-            lo = product(shape[:ax])
-            hi = lo * shape[ax]
+            shape = self.var2shape[reduce_var]
+            assert 0 <= axis < len(shape)
+            lo = product(shape[:axis])
+            hi = lo * shape[axis]
             out_layout1 = filter_lo_hi(in_layout, lo, hi)
-            out_layout, out_layout1 = self._infer_layout(shape, shape, out_layout, out_layout1)
+            out_layout, out_layout1, updated = self._infer_layout(shape, shape, out_layout, out_layout1)
         else:
             if out_layout is not None:
                 in_shape = self.var2shape[in_var]
@@ -1203,9 +1268,36 @@ class InferLogicalLayout(IRVisitor):
                     di = in_stride[i]
                     if di < lo or di >= hi:
                         in_stride[i] = out_stride[i]
+                        updated = True
         self._update_var_layout(in_var, in_layout)
-        self._update_var_layout(out_var, out_layout)
+        self._update_var_layout(reduce_var, out_layout)
+        return updated
+
+    def visit_Reduce(self, op: Reduce):
+        vars = self.op2vars[op]
+        in_var, out_var = vars
+        self._unify_reduce_layout(in_var, out_var, op.axis)
+        in_layout = self._get_var_layout(in_var)
+        out_layout = self._get_var_layout(out_var)
         if self._layout_resolved(in_layout) and self._layout_resolved(out_layout):
+            self.ops_resolved.append(op)
+
+    def visit_InclusiveScan(self, op: InclusiveScan):
+        updated = True
+        while updated:
+            vars = self.op2vars[op]
+            in_var, out_var = vars[0], vars[-1]
+            assert in_var in self.var2shape and out_var in self.var2shape
+            in_shape = self.var2shape[in_var]
+            out_shape = self.var2shape[out_var]
+            in_layout = self._get_var_layout(in_var)
+            out_layout = self._get_var_layout(out_var)
+            in_layout, out_layout, updated = self._infer_layout(in_shape, out_shape, in_layout, out_layout)
+            self._update_var_layout(in_var, in_layout)
+            self._update_var_layout(out_var, out_layout)
+            in_var, reduce_var = vars[0], vars[1]
+            updated = self._unify_reduce_layout(in_var, reduce_var, op.axis)
+        if all(self._layout_resolved(self._get_var_layout(v)) for v in vars):
             self.ops_resolved.append(op)
 
     def visit_Broadcast(self, op: Broadcast):
@@ -1366,7 +1458,7 @@ class InferLogicalLayout(IRVisitor):
         out_shape = self.var2shape[out_var]
         in_layout = self._get_var_layout(in_var)
         out_layout = self._get_var_layout(out_var)
-        in_layout, out_layout = self._infer_layout(in_shape, out_shape, in_layout, out_layout)
+        in_layout, out_layout, _ = self._infer_layout(in_shape, out_shape, in_layout, out_layout)
         self._update_var_layout(in_var, in_layout)
         self._update_var_layout(out_var, out_layout)
         if self._layout_resolved(in_layout) and self._layout_resolved(out_layout):
@@ -2270,26 +2362,31 @@ class PartitionDstInferRules(InferRules):
         self.update_infer_rules("i2o", forward).update_infer_rules("o2i", forward)
 
 
+def infer_reduced_layout(
+    op: Union[Reduce, InclusiveScan],
+    args: List[LogicalEncoding],
+    ctx: InferContext,
+    input_vars: Optional[List[Var]] = None,
+    output_var: Optional[Var] = None,
+):
+    enc = args[0]
+    shp = enc.shape
+    tv = enc.layout
+    thrd, val = tv
+    axis = op.axis
+    cont_stride = compact_col_major(shp)
+    lo = cont_stride[axis]
+    hi = lo * shp[axis]
+    out_t = filter_lo_hi(thrd, lo, hi)
+    out_v = filter_lo_hi(val, lo, hi)
+    out_tv = make_layout(out_t, out_v)
+    return [infer_result(logical_encoding(shp, out_tv))]
+
+
 @register_infer_rules(Reduce)
 class ReduceInferRules(InferRules):
     def __init__(self):
         super().__init__()
-
-        def infer_output(
-            op: Reduce,
-            args: List[LogicalEncoding],
-            ctx: InferContext,
-            input_vars: Optional[List[Var]] = None,
-            output_var: Optional[Var] = None,
-        ):
-            enc = args[0]
-            shp = enc.shape
-            tv = enc.layout
-            thrd, val = tv
-            out_tv = op.infer_layout(shp, thrd, val)
-            thrd, val = out_tv.thr_layout(), out_tv.val_layout()
-            out_tv = make_layout(thrd, val)
-            return [infer_result(logical_encoding(shp, out_tv))]
 
         # TODO: check if this function is safe or not
         def infer_input(
@@ -2323,7 +2420,24 @@ class ReduceInferRules(InferRules):
             tv = make_layout(thrd, val)
             return [infer_result(logical_encoding(shp, tv))]
 
-        self.update_infer_rules("i2o", infer_output).update_infer_rules("o2i", infer_input)
+        self.update_infer_rules("i2o", infer_reduced_layout).update_infer_rules("o2i", infer_reduced_layout)
+
+
+def infer_identical_thread_value_layout(
+    op: Union[Arithmetic, Pack, GetItem, InclusiveScan],
+    args: List[LogicalEncoding],
+    ctx: InferContext,
+    input_vars: Optional[List[Var]] = None,
+    output_var: Optional[Var] = None,
+):
+    enc = args[0]
+    shp = enc.shape
+    thr, val = enc.layout
+    layout = ctx.var2layout[output_var]
+    inp_thr = composition(layout, thr)
+    inp_val = composition(layout, val)
+    inp_enc = logical_encoding(shp, make_layout(inp_thr, inp_val))
+    return [infer_result(inp_enc)]
 
 
 @register_infer_rules(Arithmetic)
@@ -2332,24 +2446,6 @@ class ArithmeticInferRules(InferRules):
         super().__init__()
 
         def infer(
-            op: Arithmetic,
-            args: List[LogicalEncoding],
-            ctx: InferContext,
-            input_vars: Optional[List[Var]] = None,
-            output_var: Optional[Var] = None,
-        ):
-            enc = args[0]
-            shp = enc.shape
-            thr, val = enc.layout
-            layout = ctx.var2layout[output_var]
-            inp_thr = composition(layout, thr)
-            inp_val = composition(layout, val)
-            inp_enc = logical_encoding(shp, make_layout(inp_thr, inp_val))
-            return [infer_result(inp_enc)]
-
-        self.update_infer_rules("i2i", infer)
-
-        def infer2(
             op: Arithmetic,
             args: List[LogicalEncoding],
             ctx: InferContext,
@@ -2373,8 +2469,28 @@ class ArithmeticInferRules(InferRules):
             layout = make_layout(thr, val)
             return [infer_result(logical_encoding(shape, layout))]
 
-        self.update_infer_rules("i2o", infer2)
+        self.update_infer_rules("i2o", infer).update_infer_rules("i2i", infer_identical_thread_value_layout)
 
+
+@register_infer_rules(Pack)
+class PackInferRules(InferRules):
+    def __init__(self):
+        super().__init__()
+        self.update_infer_rules("i2i", infer_identical_thread_value_layout)
+
+
+@register_infer_rules(GetItem)
+class GetItemInferRules(InferRules):
+    def __init__(self):
+        super().__init__()
+        self.update_infer_rules("i2i", infer_identical_thread_value_layout)
+
+
+@register_infer_rules(InclusiveScan)
+class InclusiveScanInferRules(InferRules):
+    def __init__(self):
+        super().__init__()
+        self.update_infer_rules("i2i", infer_identical_thread_value_layout).update_infer_rules("io2init", infer_reduced_layout)
 
 @register_infer_rules(Broadcast)
 class BroadcastInferRules(InferRules):
@@ -2543,6 +2659,19 @@ class ResolveAuto(IRVisitor):
             out_var = self.op2vars[op][-1]
             self.constraints.append(make_constraint([op.x], out_var, op, "i2o"))
             self.constraints.append(make_constraint([out_var], op.x, op, "o2i"))
+        elif isinstance(op, (Pack, GetItem)):
+            vars = self.op2vars[op]
+            narity = len(vars)
+            for i in range(narity):
+                for j in range(narity):
+                    if i != j:
+                        self.constraints.append(make_constraint([vars[j]], vars[i], op, "i2i"))
+        elif isinstance(op, InclusiveScan):
+            in_var, init_var, out_var = self.op2vars[op]
+            self.constraints.append(make_constraint([in_var], out_var, op, "i2i"))
+            self.constraints.append(make_constraint([out_var], in_var, op, "i2i"))
+            self.constraints.append(make_constraint([out_var], init_var, op, "io2init"))
+            self.constraints.append(make_constraint([in_var], init_var, op, "io2init"))
         elif isinstance(op, Arithmetic):
             vars = self.op2vars[op]
             narity = len(self.op2vars[op])
@@ -2718,6 +2847,29 @@ class ResolveAuto(IRVisitor):
             self.ops_resolved.append(e)
         self.op2vars[e] = [e.x]
 
+    def visit_Pack(self, e: Pack):
+        self.visit(e.args)
+        if any(is_auto_layout(self.infer_type(i).layout) for i in e.args):
+            self.ops_unresolved.append(e)
+        else:
+            self.ops_resolved.append(e)
+        self.op2vars[e] = [i for i in e.args]
+        
+    def visit_GetItem(self, e: GetItem):
+        self.visit(e.x)
+        if is_auto_layout(self.infer_type(e.x).layout):
+            self.ops_unresolved.append(e)
+        else:
+            self.ops_resolved.append(e)
+        self.op2vars[e] = [e.x]
+
+    def visit_InclusiveScan(self, e: InclusiveScan):
+        if e.tiled_layout is None and is_auto_layout(self.infer_type(e.x).layout):
+            self.ops_unresolved.append(e)
+        else:
+            self.ops_resolved.append(e)
+        self.op2vars[e] = [e.x, e.init]
+
     def _current_state(self):
         assert len(self.state_stack) > 0
         return self.state_stack[-1]
@@ -2854,7 +3006,7 @@ class ResolveAuto(IRVisitor):
             atom = ThrValAtom("thread_block", shp, tv)
             levels = []
             current_state.solution[op] = TiledTensorLayout(atom, levels)
-        elif isinstance(op, (SubTensor, Arithmetic, Reduce, PartitionA)):
+        elif isinstance(op, (SubTensor, Arithmetic, Reduce, PartitionA, Pack, GetItem, InclusiveScan)):
             pass
         else:
             raise NotImplementedError(f"No rule can be used to resolve {op}")
@@ -3429,7 +3581,7 @@ class ResolveAuto(IRVisitor):
                     if isinstance(op, (TensorBase, Rearrange, PartitionSrc, PartitionDst, Mask)):
                         self._resolve(op, state)
                     else:
-                        assert isinstance(op, (SubTensor, Arithmetic, Reduce, PartitionA)), f"unreachable.(op:{op})"
+                        assert isinstance(op, (SubTensor, Arithmetic, Reduce, PartitionA, Pack, GetItem, InclusiveScan)), f"unreachable.(op:{op})"
 
             self.solutions.append(state.solution)
 

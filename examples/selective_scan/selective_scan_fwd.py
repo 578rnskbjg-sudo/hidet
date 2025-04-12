@@ -5,7 +5,8 @@ import hidet
 import numpy as np
 
 from hidet.ffi import runtime_api
-from hidet.ir.expr import Expr, symbol_var
+from hidet.ir.expr import Expr, symbol_var, deref
+from hidet.ir.expr import cast as ir_cast
 from hidet.ir.primitives import math
 
 from hidet.ir.type import DataType, data_type
@@ -44,6 +45,16 @@ from hidet.ir.cute.contexts import warp_groups_producer, warp_groups_consumer
 
 
 LOG2E = np.log(2.0)
+
+
+def SSM_scan_op(a: Expr, b: Expr):
+    ab0 = ir_cast(~a, ~f32)
+    ab1 = ir_cast(~b, ~f32)
+    ab0x = deref(ab0)
+    ab0y = deref(ab0 + 1)
+    ab1x = deref(ab1)
+    ab1y = deref(ab1 + 1)
+    return math.make_vector(ab1x * ab0x, ab1x * ab0y + ab1y)
 
 
 def data(max_batch_size, d, n, total_length, input_dtype="float16", weight_dtype="float32", device="cuda"):
@@ -112,11 +123,6 @@ class SelectiveScanFn:
         padded_seqlen = block_l * cdiv(MAX_SEQLEN, block_l)
         unroll = "u{}".format(sP)
         delta_softplus = self.delta_softplus
-
-        def SSM_scan_op(a: Expr, b: Expr):
-            a2 = cast(~a, ~f32)
-            b2 = cast(~b, ~f32)
-            return math.make_vector(b2[0] * a2[0], b2[0] * a2[1] + b2[1])
 
         with hidet.script_module() as script_module:
 
@@ -271,8 +277,8 @@ class SelectiveScanFn:
                     tXrSSMStates = partition_dst(rSSMStates, auto_copy())
                     copy(auto_copy((block_d, block_n, block_l)), tXgSSMStates, tXrSSMStates)
                     fill(rOnes, 1.0)
-                    rInit = pack(rOnes, cast(tXrSSMStates, f32))
-                    tXrInit = partition_src(rInit, auto_copy())
+                    rRunningPrefix = pack(rOnes, cast(tXrSSMStates, f32))
+                    tXrInit = partition_src(rRunningPrefix, auto_copy())
                     tXsSSMStates = partition_dst(sSSMStates, auto_copy())
                     copy(auto_copy((block_d, block_n, block_l)), tXrInit, tXsSSMStates)
 
@@ -383,7 +389,7 @@ class SelectiveScanFn:
 
         return script_module.build()
 
-    def scan_fwd_v1(self, block_d: int, block_l: int, block_n: int, sP: int):
+    def scan_fwd_single_buffer(self, block_d: int, block_l: int, block_n: int, sP: int):
         batch_size = symbol_var("batch_size")
         total_length = symbol_var("total_length")
         d = self.dims
@@ -399,14 +405,9 @@ class SelectiveScanFn:
         unroll = "u{}".format(sP)
         delta_softplus = self.delta_softplus
 
-        def SSM_scan_op(a: Expr, b: Expr):
-            a2 = cast(~a, ~f32)
-            b2 = cast(~b, ~f32)
-            return math.make_vector(b2[0] * a2[0], b2[0] * a2[1] + b2[1])
-
-        num_threads = 256
+        num_threads = 128
         num_elements_per_thread = block_d * block_n * block_l // num_threads
-        vector_size_d = 8 // input_t.nbytes
+        vector_size_d = 4 // input_t.nbytes
         vector_size_n = num_elements_per_thread // (vector_size_d * block_l)
         remaining_vector_d = block_d // vector_size_d
         remaining_vector_n = block_n // vector_size_n
@@ -435,7 +436,254 @@ class SelectiveScanFn:
                 query_start_loc: i32[batch_size + 1],
             ):
                 attrs.func_kind = "cuda_kernel"
-                attrs.cuda.block_dim = 256
+                attrs.cuda.block_dim = num_threads
+                attrs.cuda.grid_dim = blocks_b * blocks_d
+                attrs.cuda.dynamic_smem_bytes = 0
+
+                bid = blockIdx.x
+                batch_idx = bid // blocks_d
+                bid_d = bid % blocks_d
+
+                sequence_start_index = query_start_loc[batch_idx]
+                seqlen = query_start_loc[batch_idx + 1] - sequence_start_index
+
+                blocks_l = cdiv(seqlen, block_l)
+
+                gU = tensor_view(
+                    u[sequence_start_index:, bid_d * block_d : (bid_d + 1) * block_d],
+                    TensorLayout((block_d, block_n, padded_seqlen), (1, 0, d)),
+                    "global",
+                )
+                gDelta = tensor_view(
+                    delta[sequence_start_index:, bid_d * block_d : (bid_d + 1) * block_d],
+                    TensorLayout((block_d, block_n, padded_seqlen), (1, 0, d)),
+                    "global",
+                )
+                gZ = tensor_view(
+                    z[sequence_start_index:, bid_d * block_d : (bid_d + 1) * block_d],
+                    TensorLayout((block_d, block_n, padded_seqlen), (1, 0, d)),
+                    "global",
+                )
+                gOut = tensor_view(
+                    out[sequence_start_index:, bid_d * block_d : (bid_d + 1) * block_d],
+                    TensorLayout((block_d, block_n, padded_seqlen), (1, 0, d)),
+                    "global",
+                )
+                gDeltaBias = tensor_view(
+                    delta_bias[bid_d * block_d : (bid_d + 1) * block_d],
+                    TensorLayout((block_d, block_n, block_l), (1, 0, 0)),
+                    "global",
+                )
+                gD = tensor_view(
+                    D[bid_d * block_d : (bid_d + 1) * block_d],
+                    TensorLayout((block_d, block_n, block_l), (1, 0, 0)),
+                    "global",
+                )
+                tXgDeltaBias = partition_src(gDeltaBias, auto_copy())
+                tXgD = partition_src(gD, auto_copy())
+                rDeltaBias = make_tensor(f32, layout_auto((block_d, block_n, block_l), (1, 0, 0)), "register")
+                rD = make_tensor(f32, layout_auto((block_d, block_n, block_l), (1, 0, 0)), "register")
+                tXrDeltaBias = partition_dst(rDeltaBias, auto_copy())
+                tXrD = partition_dst(rD, auto_copy())
+
+                rA = make_tensor(weight_t, layout_auto((block_d, block_n, block_l), (1, 1, 0)), "register")
+                rU = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 0, 1)), "register")
+                rDelta = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 0, 1)), "register")
+                rB = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (0, 1, 1)), "register")
+                rC = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (0, 1, 1)), "register")
+                rZ = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 0, 1)), "register")
+
+                sDelta = make_tensor(input_t, TensorLayout((block_d, block_n, block_l), (1, 0, block_d)), "shared")
+                sU = make_tensor(input_t, TensorLayout((block_d, block_n, block_l), (1, 0, block_d)), "shared")
+                sB = make_tensor(input_t, TensorLayout((block_d, block_n, block_l), (0, 1, block_n)), "shared")
+                sC = make_tensor(input_t, TensorLayout((block_d, block_n, block_l), (0, 1, block_n)), "shared")
+                sZ = make_tensor(input_t, TensorLayout((block_d, block_n, block_l), (1, 0, block_d)), "shared")
+
+                tXgOut = partition_dst(gOut, auto_copy())
+
+                tUsU = partition_dst(sU, auto_copy())
+                tZsZ = partition_dst(sZ, auto_copy())
+                tDsDelta = partition_dst(sDelta, auto_copy())
+                tBsB = partition_dst(sB, auto_copy())
+                tCsC = partition_dst(sC, auto_copy())
+
+                tXsU = partition_src(sU, auto_copy())
+                tXsZ = partition_src(sZ, auto_copy())
+                tXsDelta = partition_src(sDelta, auto_copy())
+                tXsB = partition_src(sB, auto_copy())
+                tXsC = partition_src(sC, auto_copy())
+
+                tXrU = partition_dst(rU, auto_copy())
+                tXrZ = partition_dst(rZ, auto_copy())
+                tXrDelta = partition_dst(rDelta, auto_copy())
+                tXrA = partition_dst(rA, auto_copy())
+                tXrB = partition_dst(rB, auto_copy())
+                tXrC = partition_dst(rC, auto_copy())
+
+                copy(auto_copy((block_d, block_n, block_l)), tXgDeltaBias, tXrDeltaBias)
+                copy(auto_copy((block_d, block_n, block_l)), tXgD, tXrD)
+
+                residue = seqlen % block_l
+                mask_u = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                mask_delta = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                mask_z = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                mask_b = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                mask_c = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                mask_out = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+
+                # load the input tensors
+                for i in range(blocks_n):
+                    gA = tensor_view(
+                        A[bid_d * block_d : (bid_d + 1) * block_d, i * block_n : (i + 1) * block_n,],
+                        TensorLayout((block_d, block_n, block_l), (n, 1, 0)),
+                        "global",
+                    )
+                    gB = tensor_view(
+                        B[sequence_start_index:, i * block_n : (i + 1) * block_n],
+                        TensorLayout((block_d, block_n, padded_seqlen), (0, 1, n)),
+                        "global",
+                    )
+                    gC = tensor_view(
+                        C[sequence_start_index:, i * block_n : (i + 1) * block_n],
+                        TensorLayout((block_d, block_n, padded_seqlen), (0, 1, n)),
+                        "global",
+                    )
+
+                    tXgA = partition_src(gA, auto_copy())
+                    copy(auto_copy((block_d, block_n, block_l)), tXgA, tXrA)
+                    rA_LOG2E = tXrA * LOG2E
+
+                    gSSMStates = tensor_view(
+                        ssm_states[
+                            batch_idx, bid_d * block_d : (bid_d + 1) * block_d, i * block_n : (i + 1) * block_n,
+                        ],
+                        TensorLayout((block_d, block_n, block_l), (n, 1, 0)),
+                        "global",
+                    )
+                    rSSMStates = make_tensor(input_t, layout_auto((block_d, block_n, block_l), (1, 1, 0)), "register")
+                    rOnes = make_tensor(f32, layout_auto((block_d, block_n, block_l), (1, 1, 0)), "register")
+                    tXgSSMStates = partition_src(gSSMStates, auto_copy())
+                    tXrSSMStates = partition_dst(rSSMStates, auto_copy())
+                    copy(auto_copy((block_d, block_n, block_l)), tXgSSMStates, tXrSSMStates)
+                    fill(rOnes, 1.0)
+                    rRunningPrefix = pack(rOnes, cast(tXrSSMStates, f32))
+
+                    tUgU = partition_src(gU, auto_copy())
+                    tZgZ = partition_src(gZ, auto_copy())
+                    tDgDelta = partition_src(gDelta, auto_copy())
+                    tBgB = partition_src(gB, auto_copy())
+                    tCgC = partition_src(gC, auto_copy())
+
+                    for j in range(blocks_l):
+                        if j == blocks_l - 1:
+                            copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, j], tUsU, mask_u)
+                            copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, j], tDsDelta, mask_delta)
+                            copy(auto_copy((block_d, block_n, block_l)), tBgB[:, :, :, j], tBsB, mask_b)
+                            copy(auto_copy((block_d, block_n, block_l)), tCgC[:, :, :, j], tCsC, mask_c)
+                            copy(auto_copy((block_d, block_n, block_l)), tZgZ[:, :, :, j], tZsZ, mask_z)
+                        else:
+                            copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, j], tUsU)
+                            copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, j], tDsDelta)
+                            copy(auto_copy((block_d, block_n, block_l)), tBgB[:, :, :, j], tBsB)
+                            copy(auto_copy((block_d, block_n, block_l)), tCgC[:, :, :, j], tCsC)
+                            copy(auto_copy((block_d, block_n, block_l)), tZgZ[:, :, :, j], tZsZ)
+                        cp_async_wait_group(0)
+                        cp_async_commit_group()
+                        syncthreads()
+
+                        copy(auto_copy((block_d, block_n, block_l)), tXsU, tXrU)
+                        copy(auto_copy((block_d, block_n, block_l)), tXsDelta, tXrDelta)
+                        copy(auto_copy((block_d, block_n, block_l)), tXsB, tXrB)
+                        copy(auto_copy((block_d, block_n, block_l)), tXsC, tXrC)
+
+                        # t1 = rDelta + rDeltaBias # (d, n, l):(1, 0, 1)
+                        if delta_softplus:
+                            t1 = softplus(tXrDelta + tXrDeltaBias)  # (d, n, l):(1, 0, 1)
+                        else:
+                            t1 = tXrDelta + tXrDeltaBias  # (d, n, l):(1, 0, 1)
+                        delta_u = t1 * tXrU
+                        theta1 = delta_u * tXrB  # (d, n, l)
+                        # theta0 = t1 * rA_log2e # (d, n, l)
+                        theta0 = exp2(t1 * rA_LOG2E)  # (d, n, l)
+                        # (d, n, l)
+                        scan0 = pack(theta0, theta1)
+
+                        scan_result = inclusive_scan(
+                            scan0,
+                            axis=2,
+                            init=rRunningPrefix,
+                            scan_op=SSM_scan_op,
+                            layout=tiled_layout,
+                            update_init=True,
+                        )
+                        scan2 = get(scan_result, 1) * tXrC
+
+                        yc = reduce_sum(scan2, axis=1)
+
+                        copy(auto_copy((block_d, block_n, block_l)), tXsZ, tXrZ)
+
+                        du = tXrD * tXrU  # (d, n, l):(1, 0, 1)
+                        add = du + yc  # (d, n, l):(1, 0, 1)
+
+                        rOut = add * silu(cast(tXrZ, f32))
+
+                        tXrOut = partition_src(cast(rOut, input_t), auto_copy())
+                        if j == blocks_l - 1:
+                            copy(auto_copy((block_d, block_n, block_l)), tXrOut, tXgOut[:, :, :, j], mask_out)
+                        else:
+                            copy(auto_copy((block_d, block_n, block_l)), tXrOut, tXgOut[:, :, :, j])
+                        syncthreads()
+
+        return script_module.build()
+
+    def scan_fwd_pipelined(self, block_d: int, block_l: int, block_n: int, sP: int):
+        batch_size = symbol_var("batch_size")
+        total_length = symbol_var("total_length")
+        d = self.dims
+        n = self.dstate
+        input_t = self.input_t
+        weight_t = self.weight_t
+
+        blocks_b = batch_size
+        blocks_d = cdiv(d, block_d)
+        blocks_n = cdiv(n, block_n)
+        MAX_SEQLEN = 16384
+        padded_seqlen = block_l * cdiv(MAX_SEQLEN, block_l)
+        unroll = "u{}".format(sP)
+        delta_softplus = self.delta_softplus
+
+        num_threads = 128
+        num_elements_per_thread = block_d * block_n * block_l // num_threads
+        vector_size_d = 4 // input_t.nbytes
+        vector_size_n = num_elements_per_thread // (vector_size_d * block_l)
+        remaining_vector_d = block_d // vector_size_d
+        remaining_vector_n = block_n // vector_size_n
+        thread_value_layout = TensorLayout(
+            ((remaining_vector_d, remaining_vector_n), (vector_size_d, vector_size_n, block_l)),
+            ((vector_size_d, vector_size_n * block_d), (1, block_d, block_d * block_n)),
+        )
+
+        tv_atom = ThrValAtom("thread_block", (block_d, block_n, block_l), thread_value_layout)
+        tiled_layout = TiledTensorLayout(tv_atom)
+
+        with hidet.script_module() as script_module:
+
+            @hidet.script
+            def func(
+                u: input_t[total_length, d],
+                ssm_states: input_t[max_batch_size, d, n],
+                delta: input_t[total_length, d],
+                A: weight_t[d, n],
+                B: input_t[total_length, n],
+                C: input_t[total_length, n],
+                D: f32[d],
+                z: input_t[total_length, d],
+                delta_bias: f32[d],
+                out: input_t[total_length, d],
+                query_start_loc: i32[batch_size + 1],
+            ):
+                attrs.func_kind = "cuda_kernel"
+                attrs.cuda.block_dim = num_threads
                 attrs.cuda.grid_dim = blocks_b * blocks_d
                 attrs.cuda.dynamic_smem_bytes = 0
 
@@ -508,10 +756,6 @@ class SelectiveScanFn:
                 sZ = make_tensor(
                     input_t, TensorLayout((block_d, block_n, block_l, sP), (1, 0, block_d, block_l * block_d)), "shared"
                 )
-                sSSMStates = make_tensor(
-                    "float32x2", TensorLayout((block_d, block_n, block_l), (block_n, 1, 0)), "shared"
-                )
-
                 tXgOut = partition_dst(gOut, auto_copy())
 
                 tUsU = partition_dst(sU, auto_copy())
@@ -558,6 +802,7 @@ class SelectiveScanFn:
 
                     tAgA = partition_src(gA, auto_copy())
                     copy(auto_copy((block_d, block_n, block_l)), tAgA, tAsA)
+
                     gSSMStates = tensor_view(
                         ssm_states[
                             batch_idx, bid_d * block_d : (bid_d + 1) * block_d, i * block_n : (i + 1) * block_n,
@@ -571,10 +816,7 @@ class SelectiveScanFn:
                     tXrSSMStates = partition_dst(rSSMStates, auto_copy())
                     copy(auto_copy((block_d, block_n, block_l)), tXgSSMStates, tXrSSMStates)
                     fill(rOnes, 1.0)
-                    rInit = pack(rOnes, cast(tXrSSMStates, f32))
-                    tXrInit = partition_src(rInit, auto_copy())
-                    tXsSSMStates = partition_dst(sSSMStates, auto_copy())
-                    copy(auto_copy((block_d, block_n, block_l)), tXrInit, tXsSSMStates)
+                    rRunningPrefix = pack(rOnes, cast(tXrSSMStates, f32))
 
                     tUgU = partition_src(gU, auto_copy())
                     tZgZ = partition_src(gZ, auto_copy())
@@ -661,15 +903,23 @@ class SelectiveScanFn:
                         # (d, n, l)
                         scan0 = pack(theta0, theta1)
 
-                        scan_result = inclusive_scan(scan0, axis=2, init=sSSMStates, scan_op=SSM_scan_op, layout=tiled_layout)
+                        scan_result = inclusive_scan(
+                            scan0,
+                            axis=2,
+                            init=rRunningPrefix,
+                            scan_op=SSM_scan_op,
+                            layout=tiled_layout,
+                            update_init=True,
+                        )
                         scan2 = get(scan_result, 1) * tXrC
 
                         yc = reduce_sum(scan2, axis=1)
 
+                        copy(auto_copy((block_d, block_n, block_l)), tXsZ[:, :, :, smem_pipe_read], tXrZ)
+
                         du = tXrD * tXrU  # (d, n, l):(1, 0, 1)
                         add = du + yc  # (d, n, l):(1, 0, 1)
 
-                        copy(auto_copy((block_d, block_n, block_l)), tXsZ[:, :, :, smem_pipe_read], tXrZ)
                         rOut = add * silu(cast(tXrZ, f32))
 
                         cp_async_wait_group(allow_on_fly_groups=sP - 2)
@@ -952,7 +1202,7 @@ if __name__ == "__main__":
     hidet.option.debug_cache_tuning(True)
     hidet.option.save_lower_ir(True)
     batch_size = 50
-    seqlen = 1408
+    seqlen = 1321
     d = 5120
     n = 32
     input_t = "float16"
@@ -966,10 +1216,11 @@ if __name__ == "__main__":
 
     fn = SelectiveScanFn(max_batch_size=max_batch_size, dims=d, dstate=n, input_t=input_t, weight_t=weight_t)
     block_d = 128
-    block_l = 8
+    block_l = 4
     block_n = 32
     sP = 2
-    func = fn.scan_fwd_v1(block_d, block_l, block_n, sP)
+    func_single_buffer = fn.scan_fwd_single_buffer(block_d, block_l, block_n, sP)
+    func_pipelined = fn.scan_fwd_pipelined(block_d, block_l, block_n, sP)
     # sP = 8
     # func2 = fn.scan_fwd_warpspecialized(block_d, block_l, block_n, sP)
     query_start_loc = torch.zeros((batch_size + 1), dtype=torch.int32, device="cuda")
@@ -980,6 +1231,7 @@ if __name__ == "__main__":
     runtime_api.set_symbol_value("batch_size", batch_size)
     runtime_api.set_symbol_value("total_length", total_length)
     out = torch.randn((total_length, d), dtype=torch.float16, device="cuda")
+    func = func_single_buffer
     func(u, ssm_states, delta, A, B, C, D, z, delta_bias, out, query_start_loc)
 
     from hidet.utils.benchmark import do_bench
@@ -1005,3 +1257,5 @@ if __name__ == "__main__":
 
     time = do_bench(fn1, percentiles=None)
     print(f"transpose u time: {time} ms")
+    memory_total = total_length * d * torch.float16.itemsize * 2
+    print(f"transpose u time: {time} ms, memory bandwidth: {memory_total / time / 1e6} GB/s")

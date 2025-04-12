@@ -11,6 +11,7 @@
 # limitations under the License.
 from typing import Union, List, Callable, Any, Tuple, Dict
 from functools import partial
+import math
 
 from hidet.ir.type import BaseType, DataType, TensorType, TensorPointerType, FuncType, void
 from hidet.ir.expr import Expr, Var, Constant, PyScalar, var, convert, if_then_else
@@ -32,6 +33,9 @@ from hidet.ir.cute.type import tiled_tensor, TiledTensorType, LogicalEncoding, l
 from hidet.ir.cute.expr import Op, CConst
 
 
+LOG2E = math.log(2.0)
+
+    
 def local_broadcast(layouts: List[TensorLayout]):
     from hidet.ir.utils import broadcast_shapes
     from hidet.ir.cute import flatten
@@ -462,9 +466,19 @@ class Softplus(UnaryOp):
             from hidet.ir.tools import infer_type
 
             dtype = infer_type(x)
-            return if_then_else(x <= dtype(20.0), math.log1p(math.exp2(x)), x)
+            return if_then_else(x <= dtype(20.0), math.log1p(math.exp2(x * LOG2E)), x)
 
         return ir_softplus
+
+
+class Exp2(UnaryOp):
+    def scalar_op(self):
+        from hidet.ir.primitives import math
+
+        def ir_exp2(x):
+            return math.exp2(x)
+
+        return ir_exp2
 
 
 class Silu(UnaryOp):
@@ -476,7 +490,7 @@ class Silu(UnaryOp):
 
             dtype = infer_type(x)
             assert isinstance(dtype, DataType)
-            return x / (dtype.one + math.exp(-x))
+            return x / (dtype.one + math.exp2(-x * LOG2E))
 
         return ir_silu
 
@@ -533,6 +547,10 @@ def exp(x: Expr):
 
 def softplus(x: Expr):
     return Softplus(x).make_call()
+
+
+def exp2(x: Expr):
+    return Exp2(x).make_call()
 
 
 def silu(x: Expr):
