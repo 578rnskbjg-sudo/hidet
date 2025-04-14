@@ -2387,40 +2387,7 @@ def infer_reduced_layout(
 class ReduceInferRules(InferRules):
     def __init__(self):
         super().__init__()
-
-        # TODO: check if this function is safe or not
-        def infer_input(
-            op: Reduce,
-            args: List[LogicalEncoding],
-            ctx: InferContext,
-            input_vars: Optional[List[Var]] = None,
-            output_var: Optional[Var] = None,
-        ):
-            enc = args[0]
-            shp = enc.shape
-            tv = enc.layout
-            thrd, val = tv
-            axis = op.axis
-            stride = compact_col_major(shp)
-            current_idx = stride[axis]
-            def process_layout(layout, current_idx):
-                shape = []
-                stride = []
-                for s, d in zip(flatten(layout.shape_tuple), flatten(layout.stride_tuple)):
-                    if d == 0:
-                        shape.append(s)
-                        stride.append(current_idx)
-                        current_idx *= s
-                    else:
-                        shape.append(s)
-                        stride.append(d)
-                return current_idx, TensorLayout(tuple(shape), tuple(stride))
-            current_idx, thrd = process_layout(thrd, current_idx)
-            current_idx, val = process_layout(val, current_idx)
-            tv = make_layout(thrd, val)
-            return [infer_result(logical_encoding(shp, tv))]
-
-        self.update_infer_rules("i2o", infer_reduced_layout).update_infer_rules("o2i", infer_reduced_layout)
+        self.update_infer_rules("i2o", infer_reduced_layout)
 
 
 def infer_identical_thread_value_layout(

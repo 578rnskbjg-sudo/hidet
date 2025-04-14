@@ -213,11 +213,6 @@ class CuteFunctor(BaseFunctor):
     def visit_MBarrierWait(self, n: MBarrierWait):
         raise NotImplementedError()
 
-<<<<<<< HEAD
-=======
-    def visit_WgmmaFenceOperand(self, n: WgmmaFenceOperand):
-        raise NotImplementedError()
-
     def visit_Pack(self, n: Pack):
         raise NotImplementedError()
 
@@ -227,7 +222,6 @@ class CuteFunctor(BaseFunctor):
     def visit_InclusiveScan(self, n: InclusiveScan):
         raise NotImplementedError()
 
->>>>>>> d03bbaa6 (selective scan runnable)
 
 class CuteVisitor(CuteFunctor, BaseVisitor):
     def visit_TiledTensorType(self, t: TiledTensorType):

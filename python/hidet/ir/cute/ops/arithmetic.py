@@ -33,7 +33,7 @@ from hidet.ir.cute.type import tiled_tensor, TiledTensorType, LogicalEncoding, l
 from hidet.ir.cute.expr import Op, CConst
 
 
-LOG2E = math.log(2.0)
+LOG2E = math.log2(math.e)
 
     
 def local_broadcast(layouts: List[TensorLayout]):
@@ -466,7 +466,7 @@ class Softplus(UnaryOp):
             from hidet.ir.tools import infer_type
 
             dtype = infer_type(x)
-            return if_then_else(x <= dtype(20.0), math.log1p(math.exp2(x * LOG2E)), x)
+            return if_then_else(x <= dtype(20.0), math.log1p(math.exp2(x * dtype(LOG2E))), x)
 
         return ir_softplus
 
@@ -490,7 +490,7 @@ class Silu(UnaryOp):
 
             dtype = infer_type(x)
             assert isinstance(dtype, DataType)
-            return x / (dtype.one + math.exp2(-x * LOG2E))
+            return x / (dtype.one + math.exp2(-x * dtype(LOG2E)))
 
         return ir_silu
 
