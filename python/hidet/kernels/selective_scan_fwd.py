@@ -11,6 +11,7 @@ from hidet.ir.expr import cast as ir_cast
 from hidet.ir.primitives import math
 
 from hidet.ir.type import DataType, data_type
+from hidet.ir.dtypes import boolean
 from hidet.lang.types import i32, f16, f32
 from hidet.lang.cuda import blockIdx, threadIdx, cp_async_commit_group, cp_async_wait_group, syncthreads
 from hidet.lang import attrs, grid
@@ -111,6 +112,7 @@ class SelectiveScanFn:
         query_start_loc: torch.Tensor,
         cache_indices: torch.Tensor,
         out_z: Optional[torch.Tensor] = None,
+        has_initial_state: Optional[torch.Tensor] = None,
     ):
         assert self.compiled_function is not None
         func = self.compiled_function
@@ -120,7 +122,7 @@ class SelectiveScanFn:
         runtime_api.set_symbol_value("batch_size", batch_size)
         if out_z is None:
             out_z = torch.empty((total_length, self.dims), dtype=dtype_to_torch(self.input_t), device="cuda")
-        func(u, ssm_states, delta, A, B, C, D, z, delta_bias, out_z, query_start_loc, cache_indices)
+        func(u, ssm_states, delta, A, B, C, D, z, delta_bias, out_z, query_start_loc, cache_indices, has_initial_state)
         return out_z
 
     def create_fake_tensors(self, total_length):
@@ -153,8 +155,10 @@ class SelectiveScanFn:
         for i in range(batch_size):
             query_start_loc[i + 1] = query_start_loc[i] + seqlen
         cache_indices = torch.zeros((batch_size), dtype=torch.int32, device="cuda")
+        has_initial_state = torch.zeros((batch_size), dtype=torch.bool, device="cuda")
         for i in range(batch_size):
             cache_indices[i] = i
+            has_initial_state[i] = True
 
         min_time = sys.float_info.max
         min_config = None
@@ -167,7 +171,7 @@ class SelectiveScanFn:
             func = module.build()
 
             def fn():
-                func(u, ssm_states, delta, A, B, C, D, z, delta_bias, out_z, query_start_loc, cache_indices)
+                func(u, ssm_states, delta, A, B, C, D, z, delta_bias, out_z, query_start_loc, cache_indices, has_initial_state)
 
             time = do_bench(fn, percentiles=None)
             if time < min_time:
@@ -187,8 +191,10 @@ class SelectiveScanFn:
             return self.scan_fwd_pipelined(block_d, block_l, sP)
 
     def scan_fwd_single_buffer(self, block_d: int, block_l: int, sP: int):
+        max_batch_size = self.max_batch_size
         batch_size = symbol_var("batch_size")
         total_length = symbol_var("total_length")
+        static_seqlen = symbol_var("static_seqlen")
         d = self.dims
         n = self.dstate
         input_t = self.input_t
@@ -232,6 +238,7 @@ class SelectiveScanFn:
                 out_z: input_t[total_length, d],
                 query_start_loc: i32[batch_size + 1],
                 cache_indices: i32[batch_size],
+                has_initial_state: boolean[batch_size],
             ):
                 attrs.func_kind = "cuda_kernel"
                 attrs.cuda.block_dim = num_threads
@@ -244,6 +251,7 @@ class SelectiveScanFn:
 
                 sequence_start_index = query_start_loc[batch_idx]
                 seqlen = query_start_loc[batch_idx + 1] - sequence_start_index
+                has_initial_state_value = has_initial_state[batch_idx]
                 cache_index = cache_indices[batch_idx]
                 if cache_index == -1:
                     return
@@ -335,9 +343,12 @@ class SelectiveScanFn:
                     rOnes = make_tensor(f32, layout_auto((block_d, block_n, block_l), (1, 1, 0)), "register")
                     tXgSSMStates = partition_src(gSSMStates, auto_copy())
                     tXrSSMStates = partition_dst(rSSMStates, auto_copy())
-                    copy(auto_copy((block_d, block_n, block_l)), tXgSSMStates, tXrSSMStates)
+                    if has_initial_state_value:
+                        copy(auto_copy((block_d, block_n, block_l)), tXgSSMStates, tXrSSMStates)
+                    else:
+                        fill(tXrSSMStates, input_t.zero)
                     fill(rOnes, 1.0)
-                    rRunningPrefix = pack(rOnes, cast(tXrSSMStates, f32))
+                    rRunningPrefix = pack(rOnes, cast(rSSMStates, f32))
 
                     tUgU = partition_src(gU, auto_copy())
                     tZgZ = partition_src(gZ, auto_copy())
@@ -405,15 +416,17 @@ class SelectiveScanFn:
 
                     if update_ssm_state:
                         # update the ssm states
-                        tXrSSMStates = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
+                        tXrSSMStates_ = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
                         tXgSSMStates_ = partition_dst(gSSMStates, auto_copy())
-                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates, tXgSSMStates_)
+                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates_, tXgSSMStates_)
 
         return script_module
 
     def scan_fwd_pipelined(self, block_d: int, block_l: int, sP: int):
+        max_batch_size = self.max_batch_size
         batch_size = symbol_var("batch_size")
         total_length = symbol_var("total_length")
+        static_seqlen = symbol_var("static_seqlen")
         d = self.dims
         n = self.dstate
         input_t = self.input_t
@@ -457,6 +470,7 @@ class SelectiveScanFn:
                 out_z: input_t[total_length, d],
                 query_start_loc: i32[batch_size + 1],
                 cache_indices: i32[batch_size],
+                has_initial_state: boolean[batch_size],
             ):
                 attrs.func_kind = "cuda_kernel"
                 attrs.cuda.block_dim = num_threads
@@ -470,6 +484,7 @@ class SelectiveScanFn:
                 sequence_start_index = query_start_loc[batch_idx]
                 seqlen = query_start_loc[batch_idx + 1] - sequence_start_index
                 cache_index = cache_indices[batch_idx]
+                has_initial_state_value = has_initial_state[batch_idx]
                 if cache_index == -1:
                     return
                 blocks_l = cdiv(seqlen, block_l)
@@ -563,7 +578,10 @@ class SelectiveScanFn:
                     rOnes = make_tensor(f32, layout_auto((block_d, block_n, block_l), (1, 1, 0)), "register")
                     tXgSSMStates = partition_src(gSSMStates, auto_copy())
                     tXrSSMStates = partition_dst(rSSMStates, auto_copy())
-                    copy(auto_copy((block_d, block_n, block_l)), tXgSSMStates, tXrSSMStates)
+                    if has_initial_state_value:
+                        copy(auto_copy((block_d, block_n, block_l)), tXgSSMStates, tXrSSMStates)
+                    else:
+                        fill(tXrSSMStates, input_t.zero)
                     fill(rOnes, 1.0)
                     rRunningPrefix = pack(rOnes, cast(tXrSSMStates, f32))
 
@@ -658,9 +676,9 @@ class SelectiveScanFn:
 
                     if update_ssm_state:
                         # update the ssm states
-                        tXrSSMStates = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
+                        tXrSSMStates_ = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
                         tXgSSMStates_ = partition_dst(gSSMStates, auto_copy())
-                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates, tXgSSMStates_)
+                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates_, tXgSSMStates_)
 
         return script_module
 
@@ -907,7 +925,10 @@ class SelectiveScanFn:
 def selective_scan_fn(
     max_batch_size: int, dims: int, dstate: int, input_t: Union[str, DataType], weight_t: Union[str, DataType], delta_softplus: bool = True, update_ssm_state: bool = False
 ):
-    return SelectiveScanFn(max_batch_size, dims, dstate, input_t, weight_t, delta_softplus, update_ssm_state)
+    with hidet.option.context():
+        hidet.option.search_space(2)
+        hidet.option.num_local_workers(1)
+        return SelectiveScanFn(max_batch_size, dims, dstate, input_t, weight_t, delta_softplus, update_ssm_state)
 
 
 if __name__ == "__main__":
