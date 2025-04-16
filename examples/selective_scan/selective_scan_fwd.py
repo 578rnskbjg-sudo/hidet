@@ -61,7 +61,7 @@ def SSM_scan_op(a: Expr, b: Expr):
     return math.make_vector(ab1x * ab0x, ab1x * ab0y + ab1y)
 
 
-def data(max_batch_size, d, n, total_length, input_dtype="float16", weight_dtype="float32", device="cuda"):
+def data(max_batch_size, d, n, total_length, input_dtype="bfloat16", weight_dtype="float32", device="cuda"):
     input_dtype = getattr(torch, input_dtype)
     weight_dtype = getattr(torch, weight_dtype)
     u = torch.randint(low=-2, high=2, size=(total_length, d), dtype=input_dtype, device=device) / 32
@@ -177,7 +177,7 @@ class SelectiveScanFn:
         print(f"best config: {min_config}, time: {min_time} ms")
         self.compiled_function = min_func
 
-    @tune.space(2, block_d=[128, 256], block_l=[4, 8], sP=[2, 3, 4, 5, 6, 7, 8])
+    @tune.space(2, block_d=[128, 256], block_l=[4, 8], sP=[1, 2, 3, 4, 5, 6, 7, 8])
     @tune.space(1, block_d=[128], block_l=[4], sP=[5])
     def modules(self, block_d: int, block_l: int, sP: int):
         tune.check(self.dims % block_d == 0)
@@ -215,6 +215,7 @@ class SelectiveScanFn:
 
         tv_atom = ThrValAtom("thread_block", (block_d, block_n, block_l), thread_value_layout)
         tiled_layout = TiledTensorLayout(tv_atom)
+        max_batch_size = self.max_batch_size
 
         with hidet.script_module() as script_module:
 
@@ -305,16 +306,7 @@ class SelectiveScanFn:
                 copy(auto_copy((block_d, block_n, block_l)), tXgDeltaBias, tXrDeltaBias)
                 copy(auto_copy((block_d, block_n, block_l)), tXgD, tXrD)
 
-                residue = seqlen % block_l
-                if residue == 0:
-                    residue = block_l
-                mask_u = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
-                mask_delta = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
-                mask_z = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
-                mask_b = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
-                mask_c = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
                 # mask_out = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
-                mask_out_z = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
 
                 # load the input tensors
                 for i in range(blocks_n):
@@ -327,7 +319,7 @@ class SelectiveScanFn:
                     rA_LOG2E = tXrA * LOG2E
 
                     gSSMStates = tensor_view(
-                        ssm_states[cache_index, bid_d * block_d : (bid_d + 1) * block_d, i * block_n : (i + 1) * block_n,],
+                        ssm_states[cache_index, bid_d * block_d : (bid_d + 1) * block_d, i * block_n : (i + 1) * block_n],
                         TensorLayout((block_d, block_n, block_l), (n, 1, 0)),
                         "global",
                     )
@@ -345,19 +337,12 @@ class SelectiveScanFn:
                     tBgB = partition_src(gB, auto_copy())
                     tCgC = partition_src(gC, auto_copy())
 
-                    for j in range(blocks_l):
-                        if j == blocks_l - 1:
-                            copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, j], tUsU, mask_u)
-                            copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, j], tDsDelta, mask_delta)
-                            copy(auto_copy((block_d, block_n, block_l)), tBgB[:, :, :, j], tBsB, mask_b)
-                            copy(auto_copy((block_d, block_n, block_l)), tCgC[:, :, :, j], tCsC, mask_c)
-                            copy(auto_copy((block_d, block_n, block_l)), tZgZ[:, :, :, j], tZsZ, mask_z)
-                        else:
-                            copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, j], tUsU)
-                            copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, j], tDsDelta)
-                            copy(auto_copy((block_d, block_n, block_l)), tBgB[:, :, :, j], tBsB)
-                            copy(auto_copy((block_d, block_n, block_l)), tCgC[:, :, :, j], tCsC)
-                            copy(auto_copy((block_d, block_n, block_l)), tZgZ[:, :, :, j], tZsZ)
+                    for j in range(blocks_l - 1):
+                        copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, j], tUsU)
+                        copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, j], tDsDelta)
+                        copy(auto_copy((block_d, block_n, block_l)), tBgB[:, :, :, j], tBsB)
+                        copy(auto_copy((block_d, block_n, block_l)), tCgC[:, :, :, j], tCsC)
+                        copy(auto_copy((block_d, block_n, block_l)), tZgZ[:, :, :, j], tZsZ)
                         cp_async_commit_group()
                         cp_async_wait_group(0)
                         syncthreads()
@@ -367,7 +352,6 @@ class SelectiveScanFn:
                         copy(auto_copy((block_d, block_n, block_l)), tXsB, tXrB)
                         copy(auto_copy((block_d, block_n, block_l)), tXsC, tXrC)
 
-                        # t1 = rDelta + rDeltaBias # (d, n, l):(1, 0, 1)
                         if delta_softplus:
                             t1 = softplus(tXrDelta + tXrDeltaBias)  # (d, n, l):(1, 0, 1)
                         else:
@@ -376,8 +360,6 @@ class SelectiveScanFn:
                         delta_u = t1 * tXrU
                         du = tXrD * tXrU  # (d, n, l):(1, 0, 1)
                         theta1 = delta_u * tXrB  # (d, n, l)
-                        # theta0 = t1 * rA_log2e # (d, n, l)
-                        # (d, n, l)
                         scan0 = pack(theta0, theta1)
 
                         scan_result = inclusive_scan(scan0, axis=2, init=rRunningPrefix, scan_op=SSM_scan_op, layout=tiled_layout, update_init=True)
@@ -389,25 +371,61 @@ class SelectiveScanFn:
 
                         add = du + yc  # (d, n, l):(1, 0, 1)
 
-                        # tXrOut = partition_src(cast(add, input_t), auto_copy())
-                        # if j == blocks_l - 1:
-                        #    copy(auto_copy((block_d, block_n, block_l)), tXrOut, tXgOut[:, :, :, j], mask_out)
-                        # else:
-                        #    copy(auto_copy((block_d, block_n, block_l)), tXrOut, tXgOut[:, :, :, j])
-
                         rOutZ = add * silu(cast(tXrZ, f32))
                         tXrOutZ = partition_src(cast(rOutZ, input_t), auto_copy())
-                        if j == blocks_l - 1:
-                            copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, j], mask_out_z)
-                        else:
-                            copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, j])
+                        copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, j])
                         syncthreads()
 
+                    residue = seqlen % block_l
+                    if residue == 0:
+                        residue = block_l
+                    mask_u = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                    mask_delta = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                    mask_z = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                    mask_b = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                    mask_c = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                    mask_out_z = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                    copy(auto_copy((block_d, block_n, block_l)), tUgU[:, :, :, blocks_l - 1], tUsU, mask_u)
+                    copy(auto_copy((block_d, block_n, block_l)), tDgDelta[:, :, :, blocks_l - 1], tDsDelta, mask_delta)
+                    copy(auto_copy((block_d, block_n, block_l)), tBgB[:, :, :, blocks_l - 1], tBsB, mask_b)
+                    copy(auto_copy((block_d, block_n, block_l)), tCgC[:, :, :, blocks_l - 1], tCsC, mask_c)
+                    copy(auto_copy((block_d, block_n, block_l)), tZgZ[:, :, :, blocks_l - 1], tZsZ, mask_z)
+                    cp_async_commit_group()
+                    cp_async_wait_group(0)
+                    syncthreads()
+
+                    copy(auto_copy((block_d, block_n, block_l)), tXsU, tXrU)
+                    copy(auto_copy((block_d, block_n, block_l)), tXsDelta, tXrDelta)
+                    copy(auto_copy((block_d, block_n, block_l)), tXsB, tXrB)
+                    copy(auto_copy((block_d, block_n, block_l)), tXsC, tXrC)
+
+                    if delta_softplus:
+                        t1 = softplus(tXrDelta + tXrDeltaBias)  # (d, n, l):(1, 0, 1)
+                    else:
+                        t1 = tXrDelta + tXrDeltaBias  # (d, n, l):(1, 0, 1)
+                    theta0 = exp2(t1 * rA_LOG2E)  # (d, n, l)
+                    delta_u = t1 * tXrU
+                    du = tXrD * tXrU  # (d, n, l):(1, 0, 1)
+                    theta1 = delta_u * tXrB  # (d, n, l)
+                    scan0 = pack(theta0, theta1)
+
+                    scan_result = inclusive_scan(scan0, axis=2, init=rRunningPrefix, scan_op=SSM_scan_op, layout=tiled_layout, update_init=True, scan_length=residue)
+                    scan2 = get(scan_result, 1) * tXrC
+
+                    yc = reduce_sum(scan2, axis=1)
+
+                    copy(auto_copy((block_d, block_n, block_l)), tXsZ, tXrZ)
+
+                    add = du + yc  # (d, n, l):(1, 0, 1)
+
+                    rOutZ = add * silu(cast(tXrZ, f32))
+                    tXrOutZ = partition_src(cast(rOutZ, input_t), auto_copy())
+                    copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, blocks_l - 1], mask_out_z)
                     if update_ssm_state:
                         # update the ssm states
-                        tXrSSMStates = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
+                        tXrSSMStates_ = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
                         tXgSSMStates_ = partition_dst(gSSMStates, auto_copy())
-                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates, tXgSSMStates_)
+                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates_, tXgSSMStates_)
 
         return script_module
 
@@ -440,6 +458,7 @@ class SelectiveScanFn:
 
         tv_atom = ThrValAtom("thread_block", (block_d, block_n, block_l), thread_value_layout)
         tiled_layout = TiledTensorLayout(tv_atom)
+        max_batch_size = self.max_batch_size
 
         with hidet.script_module() as script_module:
 
@@ -517,7 +536,6 @@ class SelectiveScanFn:
                 mask_b = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
                 mask_c = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
                 # mask_out = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
-                mask_out_z = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
 
                 tUsU = partition_dst(sU, auto_copy())
                 tZsZ = partition_dst(sZ, auto_copy())
@@ -588,7 +606,7 @@ class SelectiveScanFn:
                     cp_async_wait_group(allow_on_fly_groups=sP - 2)
                     syncthreads()
 
-                    for j in range(blocks_l):
+                    for j in range(blocks_l - 1):
                         copy(auto_copy((block_d, block_n, block_l)), tXsA, tXrA)
                         rA_LOG2E = tXrA * LOG2E
 
@@ -637,18 +655,9 @@ class SelectiveScanFn:
                         du = tXrD * tXrU  # (d, n, l):(1, 0, 1)
                         add = du + yc  # (d, n, l):(1, 0, 1)
 
-                        # tXrOut = partition_src(cast(add, input_t), auto_copy())
-                        # if j == blocks_l - 1:
-                        #    copy(auto_copy((block_d, block_n, block_l)), tXrOut, tXgOut[:, :, :, j], mask_out)
-                        # else:
-                        #    copy(auto_copy((block_d, block_n, block_l)), tXrOut, tXgOut[:, :, :, j])
-
                         rOutZ = add * silu(cast(tXrZ, f32))
                         tXrOutZ = partition_src(cast(rOutZ, input_t), auto_copy())
-                        if j == blocks_l - 1:
-                            copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, j], mask_out_z)
-                        else:
-                            copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, j])
+                        copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, j])
 
                         smem_pipe_read += 1
                         if smem_pipe_read == sP:
@@ -656,11 +665,46 @@ class SelectiveScanFn:
                         cp_async_wait_group(allow_on_fly_groups=sP - 2)
                         syncthreads()
 
+                    mask_out_z = mask(auto_copy(), [i32(block_d), i32(block_n), residue])
+                    copy(auto_copy((block_d, block_n, block_l)), tXsA, tXrA)
+                    rA_LOG2E = tXrA * LOG2E
+
+                    copy(auto_copy((block_d, block_n, block_l)), tXsU[:, :, :, smem_pipe_read], tXrU)
+                    copy(auto_copy((block_d, block_n, block_l)), tXsDelta[:, :, :, smem_pipe_read], tXrDelta)
+                    copy(auto_copy((block_d, block_n, block_l)), tXsB[:, :, :, smem_pipe_read], tXrB)
+                    copy(auto_copy((block_d, block_n, block_l)), tXsC[:, :, :, smem_pipe_read], tXrC)
+
+                    # t1 = rDelta + rDeltaBias # (d, n, l):(1, 0, 1)
+                    if delta_softplus:
+                        t1 = softplus(tXrDelta + tXrDeltaBias)  # (d, n, l):(1, 0, 1)
+                    else:
+                        t1 = tXrDelta + tXrDeltaBias  # (d, n, l):(1, 0, 1)
+                    delta_u = t1 * tXrU
+                    theta1 = delta_u * tXrB  # (d, n, l)
+                    # theta0 = t1 * rA_log2e # (d, n, l)
+                    theta0 = exp2(t1 * rA_LOG2E)  # (d, n, l)
+                    # (d, n, l)
+                    scan0 = pack(theta0, theta1)
+
+                    scan_result = inclusive_scan(scan0, axis=2, init=rRunningPrefix, scan_op=SSM_scan_op, layout=tiled_layout, update_init=True, scan_length=residue)
+                    scan2 = get(scan_result, 1) * tXrC
+
+                    yc = reduce_sum(scan2, axis=1)
+
+                    copy(auto_copy((block_d, block_n, block_l)), tXsZ[:, :, :, smem_pipe_read], tXrZ)
+
+                    du = tXrD * tXrU  # (d, n, l):(1, 0, 1)
+                    add = du + yc  # (d, n, l):(1, 0, 1)
+
+                    rOutZ = add * silu(cast(tXrZ, f32))
+                    tXrOutZ = partition_src(cast(rOutZ, input_t), auto_copy())
+                    copy(auto_copy((block_d, block_n, block_l)), tXrOutZ, tXgOutZ[:, :, :, blocks_l - 1], mask_out_z)
+
                     if update_ssm_state:
                         # update the ssm states
-                        tXrSSMStates = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
+                        tXrSSMStates_ = partition_src(cast(get(rRunningPrefix, 1), input_t), auto_copy())
                         tXgSSMStates_ = partition_dst(gSSMStates, auto_copy())
-                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates, tXgSSMStates_)
+                        copy(auto_copy((block_d, block_n, block_l)), tXrSSMStates_, tXgSSMStates_)
 
         return script_module
 
@@ -910,7 +954,7 @@ def selective_scan_fn(
     return SelectiveScanFn(max_batch_size, dims, dstate, input_t, weight_t, delta_softplus, update_ssm_state)
 
 
-if __name__ == "__main__":
+def test1():
     hidet.option.cache_dir("./demo_selective_scan")
     hidet.option.debug_cache_tuning(True)
     hidet.option.save_lower_ir(True)
@@ -1038,3 +1082,91 @@ if __name__ == "__main__":
     time = do_bench(fn2, percentiles=None)
     memory_total = total_length * d * 4 * torch.float16.itemsize + total_length * n * 2 * torch.float16.itemsize + d * n * torch.float32.itemsize + d * 2 * torch.float32.itemsize
     print(f"selective scan time (vLLM): {time} ms, memory bandwidth: {memory_total / time / 1e6} GB/s")
+
+
+def test2():
+    hidet.option.cache_dir("./demo_selective_scan")
+    hidet.option.debug_cache_tuning(True)
+    hidet.option.save_lower_ir(True)
+    hidet.option.search_space(2)
+    hidet.option.num_local_workers(1)
+    batch_size = 128
+    seqlen = 1321
+    d = 5120
+    n = 32
+    input_t = "bfloat16"
+    weight_t = "float32"
+    max_batch_size = 256
+
+    total_length = batch_size * seqlen
+    u, ssm_states, delta, A, B, C, D, z, delta_bias = data(max_batch_size, d=d, n=n, total_length=total_length, input_dtype=input_t, weight_dtype=weight_t)
+    query_start_loc = torch.zeros((batch_size + 1), dtype=torch.int32, device="cuda")
+    query_start_loc[0] = 0
+    for i in range(batch_size):
+        query_start_loc[i + 1] = query_start_loc[i] + seqlen
+    print(query_start_loc)
+    cache_indices = torch.zeros((batch_size), dtype=torch.int32, device="cuda")
+    for i in range(batch_size):
+        cache_indices[i] = i
+
+    ssm_states1 = ssm_states.clone()
+    z1 = z.clone().transpose(0, 1).contiguous()
+    fn = SelectiveScanFn(max_batch_size=max_batch_size, dims=d, dstate=n, input_t=input_t, weight_t=weight_t, update_ssm_state=True)
+    out_z = torch.empty((total_length, d), dtype=dtype_to_torch(data_type(input_t)), device="cuda")
+    out_z = fn(u, ssm_states, delta, A, B, C, D, z, delta_bias, query_start_loc, cache_indices, out_z)
+    print(ssm_states[0])
+    
+    u1 = u.clone().transpose(0, 1)
+    delta1 = delta.clone().transpose(0, 1)
+    A1 = A.clone()
+    B1 = B.clone().transpose(0, 1)
+    C1 = C.clone().transpose(0, 1)
+    D1 = D.clone()
+    has_initial_state = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+    has_initial_state = has_initial_state.to(torch.bool)
+    print(has_initial_state)
+
+    #import torch.nn.functional as F
+    #t1 = F.softplus(delta.float() + delta_bias)
+    #t2 = torch.exp(t1.squeeze(0).unsqueeze(-1) * A)
+    #t3 = t1 * u.float()
+    #t4 = t3.view(d, 1) * B.view(1, n).float()
+    #t5 = t2 * ssm_states1[0].float() + t4
+    #print(t5.to(torch.float16))
+   
+    from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
+    out2 = selective_scan_fn(u1, ssm_states1, delta1, A1, B1, C1, D1, z1, delta_bias, True, query_start_loc, cache_indices, has_initial_state)
+    out2 = out2.transpose(0, 1)
+    print(out_z)
+    print(out2)
+    print(ssm_states1[0])
+
+    np.testing.assert_allclose(ssm_states.to(torch.float32).cpu(), ssm_states1.to(torch.float32).cpu(), rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(out_z.to(torch.float32).cpu(), out2.to(torch.float32).cpu(), rtol=1e-2, atol=1e-2)
+
+
+    def fn1():
+        return fn(u, ssm_states, delta, A, B, C, D, z, delta_bias, query_start_loc, cache_indices, out_z)
+
+    time = do_bench(fn1, percentiles=None)
+    print(f"selective scan time(fn): {time} ms")
+
+
+    u1 = u.transpose(0, 1)
+    delta1 = delta.transpose(0, 1)
+    B1 = B.transpose(0, 1)
+    C1 = C.transpose(0, 1)
+    z1 = z.transpose(0, 1).contiguous()
+
+    def fn2():
+        return selective_scan_fn(u1, ssm_states, delta1, A, B1, C1, D, z1, delta_bias, True, query_start_loc, cache_indices, has_initial_state)
+
+    out2 = fn2()
+    out2 = out2.transpose(0, 1)
+    time = do_bench(fn2, percentiles=None)
+    memory_total = total_length * d * 4 * torch.float16.itemsize + total_length * n * 2 * torch.float16.itemsize + d * n * torch.float32.itemsize + d * 2 * torch.float32.itemsize
+    print(f"selective scan time (vLLM): {time} ms, memory bandwidth: {memory_total / time / 1e6} GB/s")
+
+
+if __name__ == "__main__":
+    test2()

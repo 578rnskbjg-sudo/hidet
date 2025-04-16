@@ -31,6 +31,8 @@ from hidet.ir.cute import (
     flatten,
     coalesce,
     compact_col_major,
+    common_reshape,
+    idx2crd,
 )
 from hidet.ir.cute.type import TiledTensorType, TiledTensorLayout
 from hidet.ir.cute.contexts import tid_in_groups
@@ -122,7 +124,7 @@ class InclusiveScanEmitter(OpEmitter):
                 )
             )
         )
-        _, scan_shape, scan_stride = list(
+        scan_coord_stride, scan_shape, scan_stride = list(
             zip(
                 *list(
                     sorted(
@@ -136,7 +138,9 @@ class InclusiveScanEmitter(OpEmitter):
         )
         par_layout = coalesce(TensorLayout(par_shape, par_stride))
         scan_layout = coalesce(TensorLayout(scan_shape, scan_stride))
-        return par_layout, scan_layout
+        scan_coord_layout = coalesce(TensorLayout(scan_shape, scan_coord_stride))
+        scan_layout, scan_coord_layout = common_reshape(scan_layout, scan_coord_layout)
+        return par_layout, scan_layout, scan_coord_layout
 
     def schedule(
         self,
@@ -377,7 +381,7 @@ class InclusiveScanEmitter(OpEmitter):
             self.op2exec_plan[op] = (algo, plan)
  
         if algo == "thread_scan":
-            par_layout, scan_layout = plan
+            par_layout, scan_layout, scan_coord_layout = plan
 
             num_iters_par = par_layout.size()
             num_iters_scan = scan_layout.size()
@@ -392,8 +396,14 @@ class InclusiveScanEmitter(OpEmitter):
                 self.declare(running_var, running_prefix)
                 with self.for_grid(num_iters_scan) as i:
                     index = j + scan_layout(i)
-                    self.assign(running_var, op.scan_op(running_var, x_arg.buffer[index]))            
-                    self.buffer_store(output.buffer, [index], running_var)
+                    if op.scan_length is not None:
+                        coords = idx2crd(scan_coord_layout(i), shape)
+                        with self.if_then(coords[axis] < op.scan_length):
+                            self.assign(running_var, op.scan_op(running_var, x_arg.buffer[index]))            
+                            self.buffer_store(output.buffer, [index], running_var)
+                    else:
+                        self.assign(running_var, op.scan_op(running_var, x_arg.buffer[index]))            
+                        self.buffer_store(output.buffer, [index], running_var)
                 if op.update_init:
                     self.buffer_store(init_arg.buffer, [j], running_var)
             return

@@ -9,7 +9,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Dict
 
 from hidet.ir.expr import Expr
 from hidet.ir.type import BaseType, DataType
@@ -17,10 +17,23 @@ from hidet.ir.type import BaseType, DataType
 from hidet.ir.cute.expr import Op
 from hidet.ir.cute.type import TiledTensorType, tiled_tensor, logical_encoding
 from hidet.ir.cute.layout import TiledTensorLayout, is_auto_layout, make_layout, filter_lo_hi, compact_col_major
+from hidet.ir.cute.expr import CConst
 
 
 class InclusiveScan(Op):
-    def __init__(self, x: Expr, init: Expr, axis: int, scan_op: Callable[[Expr, Expr], Expr], tiled_layout: Optional[TiledTensorLayout] = None, update_init: Optional[bool] = False):
+    """
+    Perform an inclusive scan over the given axis.
+
+    Args:
+        x: The input tensor to scan.
+        init: The initial value for the scan.
+        axis: The axis to scan over.
+        scan_op: The scan operation to apply.
+        tiled_layout: The layout of the input tensor. If not provided, the layout will be inferred in layout synthesis algorithm. 
+        update_init: Whether to update the initial value.
+        scan_length: The length of the scan. If not provided, this operator will scan over all the elements in the given axis. If provided, this operator will only scan up to the given length.
+    """
+    def __init__(self, x: Expr, init: Expr, axis: int, scan_op: Callable[[Expr, Expr], Expr], tiled_layout: Optional[TiledTensorLayout] = None, update_init: Optional[bool] = False, scan_length: Optional[Expr] = None):
         super().__init__(args=[x, init], attrs={"axis": axis, "scan_op": scan_op, "tiled_layout": tiled_layout, "update_init": update_init})
         self.x: Expr = x
         self.init: Expr = init
@@ -28,7 +41,8 @@ class InclusiveScan(Op):
         self.scan_op: Callable[[Expr, Expr], Expr] = scan_op
         self.tiled_layout: Optional[TiledTensorLayout] = tiled_layout
         self.update_init: bool = update_init
-       
+        self.scan_length: Optional[Expr] = scan_length
+
     def resolve_logical_encoding(self):
         assert self.tiled_layout is not None and isinstance(self.tiled_layout, TiledTensorLayout)
         shape = self.tiled_layout.shape()
@@ -74,6 +88,18 @@ class InclusiveScan(Op):
                 raise ValueError(f"axis must be in the range of [0, {len(shape)})")
         return tiled_tensor(x_ty.dtype, x_ty.layout, x_ty.scope)
 
+    def reforward(
+        self, args: List[Expr], attrs_update: Dict[str, CConst] = None, annotations_update: Dict[str, CConst] = None
+    ):
+        attrs = self.attrs.copy()
+        annotations = self.annotations.copy()
+        if attrs_update is not None:
+            attrs.update(attrs_update)
+        if annotations_update is not None:
+            annotations.update(annotations_update)
+        ret = self.__class__(*args, **attrs, scan_length=self.scan_length)
+        ret.annotations = annotations
+        return ret
 
-def inclusive_scan(x: Expr, axis: int, init: Expr, scan_op: Callable[[Expr, Expr], Expr], layout: Optional[TiledTensorLayout] = None, update_init: Optional[bool] = False):
-    return InclusiveScan(x, init, axis, scan_op, layout, update_init).make_call()
+def inclusive_scan(x: Expr, axis: int, init: Expr, scan_op: Callable[[Expr, Expr], Expr], layout: Optional[TiledTensorLayout] = None, update_init: Optional[bool] = False, scan_length: Optional[Expr] = None):
+    return InclusiveScan(x, init, axis, scan_op, layout, update_init, scan_length).make_call()
