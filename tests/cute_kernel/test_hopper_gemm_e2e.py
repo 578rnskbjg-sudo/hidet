@@ -13,7 +13,7 @@ from hidet.utils.py import cdiv
 import hidet
 from hidet.ir.cute.algorithm import MmaAtom, TiledMma, auto_copy
 from hidet.ir.cute.layout import TensorLayout, Level
-from hidet.ir.cute import layout_auto, auto_layout
+from hidet.ir.cute import layout_auto, auto_layout, product_each, right_inverse
 from hidet.ir.cute.algorithm import CopyAtom, TiledCopy
 
 from hidet.ir.cute.ops import (
@@ -720,6 +720,14 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
     tma_copy_tx = (bm * bk + bn * bk) * f16.nbytes
     k_pipe_max = 4
 
+    # This is a tunable knob for cluster layout
+    cluster_layout = TensorLayout((1, 1), (1, 1))
+    cluster_id2mn = right_inverse(cluster_layout)
+    cluster_size = cluster_layout.size()
+    cluster_shape = product_each(cluster_layout.shape_tuple)
+    cluster_m, cluster_n = cluster_shape
+    grid_size = cluster_size * cdiv(m, cluster_m * bm) * cdiv(n, cluster_n * bn)
+
     with hidet.script_module() as script_module:
 
         @hidet.script
@@ -746,13 +754,21 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
             # Kernel Configuration
             attrs.func_kind = "cuda_kernel"
             attrs.cuda.block_dim = num_producer_threads + num_consumer_threads  # 12 warps total
-            attrs.cuda.grid_dim = cdiv(m, bm), cdiv(n, bn), 1  # Grid dimensions based on matrix size
+            attrs.cuda.grid_dim = grid_size, 1, 1  # Grid dimensions based on matrix size
+            attrs.cuda.cluster_dim = cluster_size
             attrs.cuda.min_blocks = 1
             attrs.cuda.dynamic_smem_bytes = 0  # No dynamic shared memory required
 
             # Block indices for grid-level parallelism
-            bid_x = blockIdx.x
-            bid_y = blockIdx.y
+            pid = threadIdx.x
+            cluster_id = pid % cluster_size
+            cluster_index_x = cluster_id // cdiv(n, cluster_n * bn)
+            cluster_index_y = cluster_id % cdiv(n, cluster_n * bn)
+            cluster_mn = cluster_id2mn(cluster_id)
+            cluster_index_m = cluster_mn // cluster_n
+            cluster_index_n = cluster_mn % cluster_n
+            bid_x = cluster_index_x * cluster_m + cluster_index_m
+            bid_y = cluster_index_y * cluster_n + cluster_index_n
 
             # Initialize memory barriers for producer-consumer synchronization
             mbar_tma = make_mbarriers(k_pipe_max)  # For TMA operations
@@ -848,7 +864,7 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                     wgmma_fence()
 
                     # Perform matrix multiplication using WGMMA
-                    mma(tiled_mma, tr_c, txra[:, :, ki % 2], txSb[:, :, ki, smem_pipe_read], tr_c)
+                    mma(tiled_mma, tr_c, txra[:, :, ki % 2], txSb[:, :, ki, smem_pipe_read], tr_c, cluster_layout=cluster_layout)
                     wgmma_commit_group()
 
                 # Handle last tile of first iteration
@@ -949,10 +965,10 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
 @pytest.mark.parametrize("wgmma_n", wgmma_ns)
 @pytest.mark.parametrize("m,n,k", [(1024, 1024, 1024)])
 def test_hopper_gemm_multiple_stage_rs_auto(m, n, k, wgmma_n):
-    # hidet.option.cache_dir("./demo_hopper_gemm")
-    # hidet.option.search_space(2)
-    # hidet.option.debug_cache_tuning()
-    # hidet.option.save_lower_ir(True)
+    hidet.option.cache_dir("./demo_hopper_gemm")
+    hidet.option.search_space(2)
+    hidet.option.debug_cache_tuning()
+    hidet.option.save_lower_ir(True)
 
     func = gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=wgmma_n)
     a, b, c = data(m, n, k, trans_b=True, return_hidet=True)

@@ -9,7 +9,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 from hidet.ir.cute.layout import (
     TiledTensorLayout,
@@ -37,9 +37,10 @@ class Mma(Op):
         b (Expr): The second input tensor expression.
         c (Expr): The accumulation tensor expression.
         tiled_mma (TiledMma): The tiled MMA configuration.
+        cluster_layout (TensorLayout): A function maps m and n coordinates to a cluster index.
     """
 
-    def __init__(self, tiled_mma: TiledMma, d: Expr, a: Expr, b: Expr, c: Expr):
+    def __init__(self, tiled_mma: TiledMma, d: Expr, a: Expr, b: Expr, c: Expr, cluster_layout: TensorLayout = TensorLayout(1)):
         """
         Initialize the Mma operation.
 
@@ -49,14 +50,15 @@ class Mma(Op):
             a (Expr): The first input tensor expression.
             b (Expr): The second input tensor expression.
             c (Expr): The accumulation tensor expression.
+            cluster_layout (TensorLayout): A function maps m and n coordinates to a cluster index.
         """
-
-        super().__init__(args=[d, a, b, c], attrs={"tiled_mma": tiled_mma})
+        super().__init__(args=[d, a, b, c], attrs={"tiled_mma": tiled_mma, "cluster_layout": cluster_layout})
         self.d: Expr = d
         self.a: Expr = a
         self.b: Expr = b
         self.c: Expr = c
         self.tiled_mma: TiledMma = tiled_mma
+        self.cluster_layout: TensorLayout = cluster_layout
 
     def reforward(
         self, args: List[Expr], attrs_update: Dict[str, CConst] = None, annotations_update: Dict[str, CConst] = None
@@ -80,7 +82,8 @@ class Mma(Op):
         if annotations_update is not None:
             annotations.update(annotations_update)
         assert "tiled_mma" in attrs
-        ret = self.__class__(attrs["tiled_mma"], *args)
+        assert "cluster_layout" in attrs
+        ret = self.__class__(attrs["tiled_mma"], *args, cluster_layout=attrs["cluster_layout"])
         ret.annotations = annotations
         return ret
 
@@ -151,8 +154,8 @@ class Mma(Op):
         return void
 
 
-def mma(tiled_mma: TiledMma, d: Expr, a: Expr, b: Expr, c: Expr):
-    return Mma(tiled_mma, d, a, b, c).make_call()
+def mma(tiled_mma: TiledMma, d: Expr, a: Expr, b: Expr, c: Expr, cluster_layout: TensorLayout = TensorLayout(1)):
+    return Mma(tiled_mma, d, a, b, c, cluster_layout).make_call()
 
 
 class WgmmaFenceOperand(Op):

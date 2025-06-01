@@ -14,7 +14,7 @@ from hidet.ir.expr import Expr, Var, Constant, var, logical_and, cast
 from hidet.ir.type import TensorType, PointerType
 from hidet.ir.dtypes import u32, boolean
 from hidet.ir.tools import infer_type
-from hidet.lang.cuda import threadIdx
+from hidet.lang.cuda import threadIdx, this_cluster
 
 from hidet.ir.cute.ops import Copy, Mask, Atomic
 from hidet.ir.cute.layout import TensorLayout, composition
@@ -101,10 +101,47 @@ class CopyEmitter(OpEmitter):
                 src_tensor_map = src.tensor_maps[tma_tensor_idx]
                 src_coords = tma_coords_transform(*src.coords)
                 assert mbarrier is not None
-                with self.if_then(tid == 0):
-                    self.append(
-                        inst(
-                            dst.buffer + dst.offset,
+                if "cluster_layout" in annotations:
+                    cluster_layout = annotations["cluster_layout"]
+                    cluster_id = var("cluster_id", u32)
+                    self.declare(cluster_id, this_cluster.block_rank)
+                    flip_shapes = []
+                    flip_strides = []
+                    current_index = 1
+                    for s, d in zip(cluster_layout.shape_tuple, cluster_layout.stride_tuple):
+                        if d == 0:
+                            flip_shapes.append(s)
+                            flip_strides.append(current_index)
+                        current_index *= s
+                    if len(flip_shapes) >= 1:
+                        multicastmask = var("multicastmask", u32)
+                        self.declare(multicastmask, 0)
+                        flip_layout = TensorLayout(tuple(flip_shapes), tuple(flip_strides))
+                        for i in range(flip_layout.size()):
+                            flip_index = cluster_id + flip_layout(i)
+                            multicastmask = multicastmask | (Constant(1, u32) << flip_index)
+                        cluster_coords = idx2crd(cluster_id, cluster_layout.shape_tuple)
+                        cluster_coords = list(map(lambda x: x[0], filter(lambda x: x[1] == 0, zip(cluster_coords, cluster_layout.stride_tuple))))
+                    else:
+                        cluster_coords = []
+                        multicastmask = None
+                    cond_vars = cluster_coords + [tid]
+                    cond = logical_and(*[crd == 0 for crd in cond_vars])
+                    with self.if_then(cond):
+                        self.append(
+                            inst(
+                                dst.buffer + dst.offset,
+                                ~src_tensor_map,
+                                src_coords,
+                                mbarrier=mbarrier.buffer + mbarrier.offset,
+                                multicastmask=multicastmask,
+                            )
+                        )
+                else:
+                    with self.if_then(tid == 0):
+                        self.append(
+                            inst(
+                                dst.buffer + dst.offset,
                             ~src_tensor_map,
                             src_coords,
                             mbarrier=mbarrier.buffer + mbarrier.offset,

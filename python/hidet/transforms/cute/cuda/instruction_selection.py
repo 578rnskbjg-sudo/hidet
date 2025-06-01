@@ -705,12 +705,13 @@ class TmaCopyInstruction(CopyInstruction):
         tma_strides = flatten(gmem_layout.stride_tuple)
         return dim, box_shape, tma_strides, swizzle, tma_extents_transform, tma_coords_transform
 
-    def __call__(self, smem: Expr, tensor_map: Expr, coords: List[Expr], mbarrier: Optional[Expr] = None):
+    def __call__(self, smem: Expr, tensor_map: Expr, coords: List[Expr], mbarrier: Optional[Expr] = None, multicastmask: Optional[Expr] = None):
         coords_rank = len(coords)
         if mbarrier is None:
+            assert multicastmask is None
             return self.apply(coords_rank, smem, tensor_map, *coords)
         else:
-            return self.apply(coords_rank, smem, tensor_map, mbarrier, *coords)
+            return self.apply(coords_rank, smem, tensor_map, mbarrier, *coords, multicastmask=multicastmask)
 
 
 atomic_instructions = []
