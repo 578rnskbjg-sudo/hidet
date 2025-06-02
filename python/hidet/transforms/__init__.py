@@ -58,6 +58,7 @@ from .cute.cuda.vectorize_elementwise import vectorize_elementwise_pass
 from .cute.cuda.shared_memory_allocation import shared_memory_allocation_pass
 from .cute.cuda.annotate_mbarrier import annotate_mbarrier_pass
 from .cute.cuda.tma_fallback_copy import tma_fallback_copy_pass
+from .cute.cuda.plan_cluster_layout import plan_cluster_layout_pass
 
 
 def lower_with(ir_module: IRModule, transforms: Sequence[Pass]) -> IRModule:
@@ -92,6 +93,7 @@ def lower(ir_module: IRModule) -> IRModule:
         instruction_selection_pass(),
         annotate_mbarrier_pass(),
         tma_fallback_copy_pass(),
+        plan_cluster_layout_pass(),
         shared_memory_allocation_pass(),
         generate_launch_func_pass(),
         lower_cute_dialect_pass(),

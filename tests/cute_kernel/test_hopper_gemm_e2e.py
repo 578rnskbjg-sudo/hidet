@@ -760,10 +760,11 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
             attrs.cuda.dynamic_smem_bytes = 0  # No dynamic shared memory required
 
             # Block indices for grid-level parallelism
-            pid = threadIdx.x
+            pid = blockIdx.x
             cluster_id = pid % cluster_size
-            cluster_index_x = cluster_id // cdiv(n, cluster_n * bn)
-            cluster_index_y = cluster_id % cdiv(n, cluster_n * bn)
+            grid_id = pid // cluster_size
+            cluster_index_x = grid_id % cdiv(m, cluster_m * bm)
+            cluster_index_y = grid_id // cdiv(m, cluster_m * bm)
             cluster_mn = cluster_id2mn(cluster_id)
             cluster_index_m = cluster_mn // cluster_n
             cluster_index_n = cluster_mn % cluster_n
@@ -831,7 +832,7 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                         write_phase = not write_phase
 
             # Consumer Warp Group: Responsible for matrix multiplication computation
-            with warp_groups_consumer([1, 2], num_regs=224):
+            with warp_groups_consumer([1, 2], num_regs=232):
                 # Pipeline control variables
                 smem_pipe_read = 0
                 read_phase = False
@@ -1015,7 +1016,6 @@ if __name__ == "__main__":
     # test_hopper_gemm_multiple_stage_rs_auto(1024, 1024, 1024, 160)
     # test_hopper_gemm_multiple_stage_rs_auto(1024, 1024, 1024, 96)
     # test_hopper_gemm_multiple_stage_rs_auto(1024, 1024, 1024, 224)
-
     # test_hopper_gemm_multiple_stage_rs_auto(1024, 1024, 1024, 64)
     # test_hopper_gemm_multiple_stage_rs_auto(1024, 1024, 1024, 128)
     # test_hopper_gemm_multiple_stage_rs_auto(1024, 1024, 1024, 256)
