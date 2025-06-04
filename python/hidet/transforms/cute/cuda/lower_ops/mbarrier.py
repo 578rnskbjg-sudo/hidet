@@ -95,10 +95,13 @@ class MBarrierArriveEmitter(OpEmitter):
         if "cluster_layout" in annotations:
             cluster_layout = annotations["cluster_layout"]
             cluster_shape = product_each(cluster_layout.shape_tuple)
-            cluster_m, cluster_n = cluster_shape
             cluster_size = cluster_layout.size()
             cluster_layout = right_inverse(cluster_layout)
-            # magic in CUTLASS
+            # We spread the mbarrier arrive to different threads in the warp group
+            # thereby we can amortize the latency of mbarrier arrive
+            # The thread mapping magic comes from CUTLASS
+            # Please refer to the following link for more details:
+            # https://github.com/NVIDIA/cutlass/blob/b244379d9b15574e07b73b814b88bd2233f0b3ce/include/cutlass/pipeline/sm90_pipeline.hpp#L100-L110
             max_cluster_size = 16
             num_signaling_threads = WARPGROUP_SIZE // max_cluster_size
             layout = ComposedTensorLayout(TensorLayout((4, 4), (4, 1)), 0, Swizzle(2, 0, -2))
@@ -117,8 +120,7 @@ class MBarrierArriveEmitter(OpEmitter):
             dst_m, dst_n = idx2crd(dst_blockid, cluster_shape)
             this_m, this_n = idx2crd(cluster_id, cluster_shape)
             conds.append(logical_or(dst_m == this_m, dst_n == this_n))
-            with self.if_then(logical_and(*conds)):
-                self.append(mbarrier_arrive(mbarrier, dst_blockid, True))
+            self.append(mbarrier_arrive(mbarrier, dst_blockid, logical_and(*conds)))
         else:
             self.append(mbarrier_arrive(mbarrier))
 

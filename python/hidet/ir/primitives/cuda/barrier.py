@@ -83,7 +83,7 @@ def register_mbarrier():
     register_primitive_function(name=cuda_mbarrier_try_wait.name, func_or_type=cuda_mbarrier_try_wait)
 
     func_name = 'cuda_mbarrier_arrive'
-    template_string = '{ .reg.pred p; .reg.b32 remAddr32; setp.eq.u32 p, %2, 1; @p mapa.shared::cluster.u32 remAddr32, %0, %1; @p mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remAddr32]; }'
+    template_string = '{ .reg.pred p; .reg.b32 remAddr32; setp.eq.u32 p, %2, 1; @p mapa.shared::cluster.u32 remAddr32, %0, %1; @p mbarrier.arrive.shared::cluster.b64 _, [remAddr32]; }'
 
     @script
     def cuda_mbarrier_arrive(mbar: ~u64, cta_id: u32, pred: u32):
