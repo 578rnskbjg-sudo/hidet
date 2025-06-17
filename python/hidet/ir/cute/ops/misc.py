@@ -303,7 +303,24 @@ def transpose(x: Expr, *dims):
 
 class Pack(Op):
     """
+    Pack a list of tensors into a single tensor.
+
+    The input tensors must have the same shape and layout.
+
+    Attributes:
+        tensors (List[Expr]): The list of tensors to be packed.
+
+    Examples:
+        a = make_tensor(f16, shape=(16, 8), register)
+        b = make_tensor(f16, shape=(16, 8), register)
+        c = pack(a, b)
+        # c is a vector of length 2 with element type f16.
+
+    Note:
+        The tensors must be distributed across the threads in the same way,
+        otherwise, the behavior is undefined.
     """
+
     def __init__(self, tensors: List[Expr]):
         super().__init__(args=tensors)
         self.tensors: List[Expr] = tensors
@@ -354,8 +371,19 @@ def pack(*tensors):
 
 
 class GetItem(Op):
+    """
+    Get an element from a tensor. Typically, each element in the
+    input tensor is a vector. This operator creates a new tensor
+    with the same shape as the input tensor, but with each element
+    being a single lane of the input vector.
+
+    Attributes:
+        x (Expr): The tensor to get the element from.
+        index (int): The index of the element to get.
+    """
+
     def __init__(self, x: Expr, index: int):
-        super().__init__(args=[x], attrs={"index": index})  
+        super().__init__(args=[x], attrs={"index": index})
         self.x: Expr = x
         self.index: int = index
 

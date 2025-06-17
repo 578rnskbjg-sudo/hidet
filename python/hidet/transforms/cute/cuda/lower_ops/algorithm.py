@@ -13,18 +13,14 @@ from typing import List, Union
 
 from hidet.utils.py import gcd
 
-from hidet.ir.primitives.cuda.sync import bar_sync
 from hidet.ir.tools import infer_type
 from hidet.ir.expr import Expr, var
 from hidet.ir.type import DataType, TensorType
-from hidet.ir.dtypes import f32
-from hidet.lang.cuda import threadIdx, syncthreads
 
 from hidet.ir.cute.ops.algorithm import InclusiveScan
 from hidet.ir.cute import (
     size,
     TensorLayout,
-    ComposedTensorLayout,
     composition,
     left_inverse,
     make_layout,
@@ -35,7 +31,6 @@ from hidet.ir.cute import (
     idx2crd,
 )
 from hidet.ir.cute.type import TiledTensorType, TiledTensorLayout
-from hidet.ir.cute.contexts import tid_in_groups
 
 from ..instruction_selection import memory_instructions
 from .registry import OpEmitter, Buffer, register_impl
@@ -45,13 +40,7 @@ from .registry import OpEmitter, Buffer, register_impl
 class InclusiveScanEmitter(OpEmitter):
     op2exec_plan = {}
 
-    def try_schedule_thread_scan(
-        self,
-        shape: List[int],
-        thr_layout: TensorLayout,
-        val_layout: TensorLayout,
-        axis: int,
-    ):
+    def try_schedule_thread_scan(self, shape: List[int], thr_layout: TensorLayout, val_layout: TensorLayout, axis: int):
         num_threads = thr_layout.size()
         shape_to_thrval = left_inverse(make_layout(thr_layout, val_layout))
         shape_to_thrval = composition(shape_to_thrval, TensorLayout(tuple(shape)))
@@ -68,7 +57,7 @@ class InclusiveScanEmitter(OpEmitter):
         lo = cont_stride[axis]
         hi = lo * shape[axis]
         for s, d in zip(flat_val_shape, flat_val_stride):
-            if d > lo and d <= hi:
+            if lo < d <= hi:
                 if s * d <= hi:
                     result_shape.append(s)
                     par_val_stride.append(0)
@@ -115,26 +104,10 @@ class InclusiveScanEmitter(OpEmitter):
                 scan_val_stride.append(0)
         cont_stride = compact_col_major(tuple(result_shape))
         par_stride, par_shape, _ = list(
-            zip(
-                *list(
-                    filter(
-                        lambda x: x[2] != 0,
-                        zip(cont_stride, result_shape, par_val_stride),
-                    )
-                )
-            )
+            zip(*list(filter(lambda x: x[2] != 0, zip(cont_stride, result_shape, par_val_stride))))
         )
         scan_coord_stride, scan_shape, scan_stride = list(
-            zip(
-                *list(
-                    sorted(
-                        filter(
-                            lambda x: x[0] != 0,
-                            zip(scan_val_stride, result_shape, cont_stride),
-                        )
-                    )
-                )
-            )
+            zip(*list(sorted(filter(lambda x: x[0] != 0, zip(scan_val_stride, result_shape, cont_stride)))))
         )
         par_layout = coalesce(TensorLayout(par_shape, par_stride))
         scan_layout = coalesce(TensorLayout(scan_shape, scan_stride))
@@ -163,9 +136,7 @@ class InclusiveScanEmitter(OpEmitter):
         total_size = size(tuple(shape))
 
         assert total_size % num_threads == 0
-        max_working_batches = gcd(
-            max_processing_elements // num_scan_length, total_size // num_scan_length
-        )
+        max_working_batches = gcd(max_processing_elements // num_scan_length, total_size // num_scan_length)
         inner_shape = []
         inner_stride = []
         outer_shape = []
@@ -197,16 +168,8 @@ class InclusiveScanEmitter(OpEmitter):
                 current_index *= inner_s
 
         shape_to_thrval = left_inverse(make_layout(thr_layout, val_layout))
-        inner_to_thrval = coalesce(
-            composition(
-                shape_to_thrval, TensorLayout(tuple(inner_shape), tuple(inner_stride))
-            )
-        )
-        outer_to_thrval = coalesce(
-            composition(
-                shape_to_thrval, TensorLayout(tuple(outer_shape), tuple(outer_stride))
-            )
-        )
+        inner_to_thrval = coalesce(composition(shape_to_thrval, TensorLayout(tuple(inner_shape), tuple(inner_stride))))
+        outer_to_thrval = coalesce(composition(shape_to_thrval, TensorLayout(tuple(outer_shape), tuple(outer_stride))))
 
         num_values = val_layout.size()
         inner_thread_shape = []
@@ -220,11 +183,7 @@ class InclusiveScanEmitter(OpEmitter):
         current_thread_index = 1
         current_value_index = 1
         sorted_sd = sorted(
-            zip(
-                flatten(inner_to_thrval.shape_tuple),
-                flatten(inner_to_thrval.stride_tuple),
-            ),
-            key=lambda x: x[1],
+            zip(flatten(inner_to_thrval.shape_tuple), flatten(inner_to_thrval.stride_tuple)), key=lambda x: x[1]
         )
         for s, d in sorted_sd:
             if d < num_threads:
@@ -274,22 +233,12 @@ class InclusiveScanEmitter(OpEmitter):
             outer_value_stride.append(current_value_index)
             inner_value_shape.append(num_values // current_value_index)
             inner_value_stride.append(0)
-        inner_thread_layout = coalesce(
-            TensorLayout(tuple(inner_thread_shape), tuple(inner_thread_stride))
-        )
-        outer_thread_layout = coalesce(
-            TensorLayout(tuple(outer_thread_shape), tuple(outer_thread_stride))
-        )
-        inner_value_layout = coalesce(
-            TensorLayout(tuple(inner_value_shape), tuple(inner_value_stride))
-        )
-        outer_value_layout = coalesce(
-            TensorLayout(tuple(outer_value_shape), tuple(outer_value_stride))
-        )
+        inner_thread_layout = coalesce(TensorLayout(tuple(inner_thread_shape), tuple(inner_thread_stride)))
+        outer_thread_layout = coalesce(TensorLayout(tuple(outer_thread_shape), tuple(outer_thread_stride)))
+        inner_value_layout = coalesce(TensorLayout(tuple(inner_value_shape), tuple(inner_value_stride)))
+        outer_value_layout = coalesce(TensorLayout(tuple(outer_value_shape), tuple(outer_value_stride)))
 
-        shared_memory_layout = TensorLayout(
-            tuple(shared_memory_shape), tuple(shared_memory_stride)
-        )
+        shared_memory_layout = TensorLayout(tuple(shared_memory_shape), tuple(shared_memory_stride))
         inner_thr_layout = coalesce(composition(thr_layout, inner_thread_layout))
         inner_val_layout = coalesce(composition(val_layout, inner_value_layout))
 
@@ -307,22 +256,18 @@ class InclusiveScanEmitter(OpEmitter):
         )
 
     def _instruction_selection(self, src: Buffer, dst: Buffer):
-        candidates = []
         for inst in memory_instructions:
             result = inst.match(src, dst)
             if result is not None:
                 return inst, *result
+        raise NotImplementedError(f"no instruction found for {src} and {dst}")
 
     def request_smem_nbytes(self, op: InclusiveScan) -> int:
         x_type = infer_type(op.x)
         if not isinstance(x_type, TiledTensorType):
-            raise TypeError(
-                f"inclusive_scan op should be applied on TiledTensorType.(got:{x_type})"
-            )
+            raise TypeError(f"inclusive_scan op should be applied on TiledTensorType.(got:{x_type})")
         if not isinstance(x_type.layout, TiledTensorLayout):
-            raise TypeError(
-                f"inclusive_scan op should be applied on TiledTensorLayout.(got:{x_type.layout})"
-            )
+            raise TypeError(f"inclusive_scan op should be applied on TiledTensorLayout.(got:{x_type.layout})")
         dtype = x_type.dtype
         shape = x_type.layout.shape()
         thr_layout = x_type.layout.thr_layout()
@@ -363,29 +308,28 @@ class InclusiveScanEmitter(OpEmitter):
             src_buf = ~src_buf[0]
         dst_buf = ~dst_buf[0]
 
-        if "group_ids" in op.annotations:
-            group_ids = op.annotations["group_ids"]
-            assert "group_threads" in op.annotations
-            group_threads = op.annotations["group_threads"]
-            tid = tid_in_groups(group_ids)
-            sync = bar_sync(group_threads)
-        else:
-            tid = threadIdx.x
-            sync = syncthreads()
-
-        num_threads = thr_layout.size()
+        # if "group_ids" in op.annotations:
+        #     group_ids = op.annotations["group_ids"]
+        #     assert "group_threads" in op.annotations
+        #     group_threads = op.annotations["group_threads"]
+        #     tid = tid_in_groups(group_ids)
+        #     sync = bar_sync(group_threads)
+        # else:
+        #     tid = threadIdx.x
+        #     sync = syncthreads()
+        # num_threads = thr_layout.size()
         if op in self.op2exec_plan:
             algo, plan = self.op2exec_plan[op]
         else:
             algo, plan = self.schedule(dtype, shape, thr_layout, val_layout, axis)
             self.op2exec_plan[op] = (algo, plan)
- 
+
         if algo == "thread_scan":
             par_layout, scan_layout, scan_coord_layout = plan
 
             num_iters_par = par_layout.size()
             num_iters_scan = scan_layout.size()
-           
+
             with self.for_grid(num_iters_par) as j:
                 if isinstance(init_arg, Buffer):
                     running_prefix = init_arg.buffer[j]
@@ -399,83 +343,74 @@ class InclusiveScanEmitter(OpEmitter):
                     if op.scan_length is not None:
                         coords = idx2crd(scan_coord_layout(i), shape)
                         with self.if_then(coords[axis] < op.scan_length):
-                            self.assign(running_var, op.scan_op(running_var, x_arg.buffer[index]))            
+                            self.assign(running_var, op.scan_op(running_var, x_arg.buffer[index]))
                             self.buffer_store(output.buffer, [index], running_var)
                     else:
-                        self.assign(running_var, op.scan_op(running_var, x_arg.buffer[index]))            
+                        self.assign(running_var, op.scan_op(running_var, x_arg.buffer[index]))
                         self.buffer_store(output.buffer, [index], running_var)
                 if op.update_init:
                     self.buffer_store(init_arg.buffer, [j], running_var)
             return
         raise NotImplementedError(f"algo: {algo}")
-        
-        (
-            outer_to_thrval,
-            outer_thread_layout,
-            inner_value_layout,
-            outer_value_layout,
-            inner_thr_layout,
-            inner_val_layout,
-            shared_memory_layout,
-            shared_memory_size,
-        ) = plan
 
-        thread_memory_layout = coalesce(
-            composition(shared_memory_layout, inner_thr_layout)
-        )
-        inner_memory_layout = coalesce(
-            composition(shared_memory_layout, inner_val_layout)
-        )
+        # XiaoZhang: The code below is commented out because in the selective_scan operator,
+        # the block_scan is not as efficient as the thread_scan. As a result, we currently
+        # use the thread_scan for the selective_scan operator. I want to keep the code
+        # of block_scan for future use.
 
-        smem_addr = var("smem", ~dtype)
-        self.declare(smem_addr, self.get_smem_ptr(op, dtype, 4))
-        sts, sts_src_layout, sts_dst_layout = self._instruction_selection(
-            Buffer(src_buf, None, dtype, inner_value_layout, "register"),
-            Buffer(smem_addr, None, dtype, inner_memory_layout, "shared"),
-        )
-        lds, lds_src_layout, lds_dst_layout = self._instruction_selection(
-            Buffer(smem_addr, None, dtype, inner_memory_layout, "shared"),
-            Buffer(dst_buf, None, dtype, inner_value_layout, "register"),
-        )
-        num_outer_iters = outer_to_thrval.size()
+        # (
+        #     outer_to_thrval,
+        #     outer_thread_layout,
+        #     inner_value_layout,
+        #     outer_value_layout,
+        #     inner_thr_layout,
+        #     inner_val_layout,
+        #     shared_memory_layout,
+        #     shared_memory_size,
+        # ) = plan
 
-        with self.for_grid([num_outer_iters]) as j:
-            thrval = outer_to_thrval(j)
-            working_thread_index = thrval % num_threads
-            current_thread_index = outer_thread_layout(tid)
-            value_index = thrval // num_threads
-            src_addr_base = var("src_addr_base", ~dtype)
-            smem_addr_base = var("smem_addr_base", ~dtype)
-            self.declare(
-                src_addr_base,
-                src_buf + outer_value_layout(value_index, base=x_arg.offset),
-            )
-            self.declare(smem_addr_base, smem_addr + thread_memory_layout(tid))
-            with self.if_then(working_thread_index == current_thread_index):
-                with self.for_grid(sts_src_layout[1].shape) as sts_coords:
-                    src_ptr = var("src_ptr", ~dtype)
-                    smem_ptr = var("smem_ptr", ~dtype)
-                    self.declare(src_ptr, src_addr_base + sts_src_layout[1](sts_coords))
-                    self.declare(
-                        smem_ptr, smem_addr_base + sts_dst_layout[1](sts_coords)
-                    )
-                    self.append(sts(src_ptr, smem_ptr))
-            self.append(sync)
+        # thread_memory_layout = coalesce(composition(shared_memory_layout, inner_thr_layout))
+        # inner_memory_layout = coalesce(composition(shared_memory_layout, inner_val_layout))
 
-            dst_addr_base = var("dst_addr_base", ~dtype)
-            self.declare(
-                dst_addr_base,
-                dst_buf + outer_value_layout(value_index, base=output.offset),
-            )
-            self.assign(smem_addr_base, smem_addr + thread_memory_layout(tid))
-            with self.if_then(working_thread_index == current_thread_index):
-                with self.for_grid(lds_src_layout[1].shape) as lds_coords:
-                    smem_ptr = var("smem_ptr", ~dtype)
-                    dst_ptr = var("dst_ptr", ~dtype)
-                    self.declare(
-                        smem_ptr, smem_addr_base + lds_src_layout[1](lds_coords)
-                    )
-                    self.declare(dst_ptr, dst_addr_base + lds_dst_layout[1](lds_coords))
-                    self.append(lds(smem_ptr, dst_ptr))
-            with self.if_then(j < num_outer_iters - 1):
-                self.append(sync)
+        # smem_addr = var("smem", ~dtype)
+        # self.declare(smem_addr, self.get_smem_ptr(op, dtype, 4))
+        # sts, sts_src_layout, sts_dst_layout = self._instruction_selection(
+        #     Buffer(src_buf, None, dtype, inner_value_layout, "register"),
+        #     Buffer(smem_addr, None, dtype, inner_memory_layout, "shared"),
+        # )
+        # lds, lds_src_layout, lds_dst_layout = self._instruction_selection(
+        #     Buffer(smem_addr, None, dtype, inner_memory_layout, "shared"),
+        #     Buffer(dst_buf, None, dtype, inner_value_layout, "register"),
+        # )
+        # num_outer_iters = outer_to_thrval.size()
+
+        # with self.for_grid([num_outer_iters]) as j:
+        #     thrval = outer_to_thrval(j)
+        #     working_thread_index = thrval % num_threads
+        #     current_thread_index = outer_thread_layout(tid)
+        #     value_index = thrval // num_threads
+        #     src_addr_base = var("src_addr_base", ~dtype)
+        #     smem_addr_base = var("smem_addr_base", ~dtype)
+        #     self.declare(src_addr_base, src_buf + outer_value_layout(value_index, base=x_arg.offset))
+        #     self.declare(smem_addr_base, smem_addr + thread_memory_layout(tid))
+        #     with self.if_then(working_thread_index == current_thread_index):
+        #         with self.for_grid(sts_src_layout[1].shape) as sts_coords:
+        #             src_ptr = var("src_ptr", ~dtype)
+        #             smem_ptr = var("smem_ptr", ~dtype)
+        #             self.declare(src_ptr, src_addr_base + sts_src_layout[1](sts_coords))
+        #             self.declare(smem_ptr, smem_addr_base + sts_dst_layout[1](sts_coords))
+        #             self.append(sts(src_ptr, smem_ptr))
+        #     self.append(sync)
+
+        #     dst_addr_base = var("dst_addr_base", ~dtype)
+        #     self.declare(dst_addr_base, dst_buf + outer_value_layout(value_index, base=output.offset))
+        #     self.assign(smem_addr_base, smem_addr + thread_memory_layout(tid))
+        #     with self.if_then(working_thread_index == current_thread_index):
+        #         with self.for_grid(lds_src_layout[1].shape) as lds_coords:
+        #             smem_ptr = var("smem_ptr", ~dtype)
+        #             dst_ptr = var("dst_ptr", ~dtype)
+        #             self.declare(smem_ptr, smem_addr_base + lds_src_layout[1](lds_coords))
+        #             self.declare(dst_ptr, dst_addr_base + lds_dst_layout[1](lds_coords))
+        #             self.append(lds(smem_ptr, dst_ptr))
+        #     with self.if_then(j < num_outer_iters - 1):
+        #         self.append(sync)

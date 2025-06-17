@@ -215,7 +215,6 @@ from hidet.ir.expr import Var, Expr, var, is_constant
 from hidet.ir.tools import TypeInfer, infer_type
 from hidet.ir.functors import IRVisitor, IRRewriter
 
-from hidet.ir.cute.int_tuple import is_tuple
 from hidet.ir.cute.expr import Op, CallOp
 from hidet.ir.cute.type import TiledTensorType, LogicalEncoding, logical_encoding
 
@@ -1005,7 +1004,11 @@ class InferLogicalLayout(IRVisitor):
             return None
 
     def _infer_layout(
-        self, in_shape: Tuple[int], out_shape: Tuple[int], in_layout: Union[TensorLayout, None], out_layout: Union[TensorLayout, None]
+        self,
+        in_shape: Tuple[int],
+        out_shape: Tuple[int],
+        in_layout: Union[TensorLayout, None],
+        out_layout: Union[TensorLayout, None],
     ):
         updated = False
         if in_layout is not None:
@@ -1155,8 +1158,6 @@ class InferLogicalLayout(IRVisitor):
             self.ops_resolved.append(op)
 
     def visit_TensorBase(self, op: TensorBase):
-        from hidet.ir.cute.layout import common_reshape
-
         vars = self.op2vars[op]
         out_var = vars[-1]
         out_layout = self._get_var_layout(out_var)
@@ -1997,10 +1998,10 @@ class MmaInferRules(InferRules):
                             )
                             if constr is not None:
                                 constr_b.append(constr)
-                from itertools import product
+                from itertools import product as itertools_product
 
                 if len(constr_a) != 0 and len(constr_b) != 0:
-                    for c1, c2 in product(constr_a, constr_b):
+                    for c1, c2 in itertools_product(constr_a, constr_b):
                         infers.append(infer_result([], memory_constraints=[c1, c2]))
                 elif len(constr_a) != 0:
                     for c in constr_a:
@@ -2457,7 +2458,10 @@ class GetItemInferRules(InferRules):
 class InclusiveScanInferRules(InferRules):
     def __init__(self):
         super().__init__()
-        self.update_infer_rules("i2i", infer_identical_thread_value_layout).update_infer_rules("io2init", infer_reduced_layout)
+        self.update_infer_rules("i2i", infer_identical_thread_value_layout).update_infer_rules(
+            "io2init", infer_reduced_layout
+        )
+
 
 @register_infer_rules(Broadcast)
 class BroadcastInferRules(InferRules):
@@ -2821,7 +2825,7 @@ class ResolveAuto(IRVisitor):
         else:
             self.ops_resolved.append(e)
         self.op2vars[e] = [i for i in e.args]
-        
+
     def visit_GetItem(self, e: GetItem):
         self.visit(e.x)
         if is_auto_layout(self.infer_type(e.x).layout):
@@ -3548,7 +3552,9 @@ class ResolveAuto(IRVisitor):
                     if isinstance(op, (TensorBase, Rearrange, PartitionSrc, PartitionDst, Mask)):
                         self._resolve(op, state)
                     else:
-                        assert isinstance(op, (SubTensor, Arithmetic, Reduce, PartitionA, Pack, GetItem, InclusiveScan)), f"unreachable.(op:{op})"
+                        assert isinstance(
+                            op, (SubTensor, Arithmetic, Reduce, PartitionA, Pack, GetItem, InclusiveScan)
+                        ), f"unreachable.(op:{op})"
 
             self.solutions.append(state.solution)
 

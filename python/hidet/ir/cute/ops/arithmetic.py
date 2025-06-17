@@ -11,7 +11,7 @@
 # limitations under the License.
 from typing import Union, List, Callable, Any, Tuple, Dict
 from functools import partial
-import math
+import math as builtin_math
 
 from hidet.ir.type import BaseType, DataType, TensorType, TensorPointerType, FuncType, void
 from hidet.ir.expr import Expr, Var, Constant, PyScalar, var, convert, if_then_else
@@ -33,9 +33,9 @@ from hidet.ir.cute.type import tiled_tensor, TiledTensorType, LogicalEncoding, l
 from hidet.ir.cute.expr import Op, CConst
 
 
-LOG2E = math.log2(math.e)
+LOG2E = builtin_math.log2(builtin_math.e)
 
-    
+
 def local_broadcast(layouts: List[TensorLayout]):
     from hidet.ir.utils import broadcast_shapes
     from hidet.ir.cute import flatten
@@ -461,7 +461,7 @@ class Relu(UnaryOp):
 class Softplus(UnaryOp):
     def scalar_op(self):
         from hidet.ir.primitives import math
-        
+
         def ir_softplus(x):
             from hidet.ir.tools import infer_type
 

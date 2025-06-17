@@ -29,12 +29,27 @@ class InclusiveScan(Op):
         init: The initial value for the scan.
         axis: The axis to scan over.
         scan_op: The scan operation to apply.
-        tiled_layout: The layout of the input tensor. If not provided, the layout will be inferred in layout synthesis algorithm. 
+        tiled_layout: The layout of the input tensor. If not provided, the layout will be inferred in layout
+        synthesis algorithm.
         update_init: Whether to update the initial value.
-        scan_length: The length of the scan. If not provided, this operator will scan over all the elements in the given axis. If provided, this operator will only scan up to the given length.
+        scan_length: The length of the scan. If not provided, this operator will scan over all the elements
+        in the given axis. If provided, this operator will only scan up to the given length.
     """
-    def __init__(self, x: Expr, init: Expr, axis: int, scan_op: Callable[[Expr, Expr], Expr], tiled_layout: Optional[TiledTensorLayout] = None, update_init: Optional[bool] = False, scan_length: Optional[Expr] = None):
-        super().__init__(args=[x, init], attrs={"axis": axis, "scan_op": scan_op, "tiled_layout": tiled_layout, "update_init": update_init})
+
+    def __init__(
+        self,
+        x: Expr,
+        init: Expr,
+        axis: int,
+        scan_op: Callable[[Expr, Expr], Expr],
+        tiled_layout: Optional[TiledTensorLayout] = None,
+        update_init: Optional[bool] = False,
+        scan_length: Optional[Expr] = None,
+    ):
+        super().__init__(
+            args=[x, init],
+            attrs={"axis": axis, "scan_op": scan_op, "tiled_layout": tiled_layout, "update_init": update_init},
+        )
         self.x: Expr = x
         self.init: Expr = init
         self.axis: int = axis
@@ -80,7 +95,9 @@ class InclusiveScan(Op):
         else:
             init_dtype = init_ty
         if not x_ty.dtype == init_dtype:
-            raise TypeError(f"input tensor and init tensor must have the same data type, but got {x_ty.dtype} and {init_dtype}")
+            raise TypeError(
+                f"input tensor and init tensor must have the same data type, but got {x_ty.dtype} and {init_dtype}"
+            )
         if not is_auto_layout(x_ty.layout):
             shape = x_ty.layout.shape()
             axis = self.axis
@@ -101,5 +118,14 @@ class InclusiveScan(Op):
         ret.annotations = annotations
         return ret
 
-def inclusive_scan(x: Expr, axis: int, init: Expr, scan_op: Callable[[Expr, Expr], Expr], layout: Optional[TiledTensorLayout] = None, update_init: Optional[bool] = False, scan_length: Optional[Expr] = None):
+
+def inclusive_scan(
+    x: Expr,
+    axis: int,
+    init: Expr,
+    scan_op: Callable[[Expr, Expr], Expr],
+    layout: Optional[TiledTensorLayout] = None,
+    update_init: Optional[bool] = False,
+    scan_length: Optional[Expr] = None,
+):
     return InclusiveScan(x, init, axis, scan_op, layout, update_init, scan_length).make_call()

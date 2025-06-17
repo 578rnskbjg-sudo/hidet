@@ -53,6 +53,7 @@ class PackEmitter(OpEmitter):
         extents = register_layout.shape
         from hidet.ir.type import TensorType, TensorPointerType, PointerType
         from hidet.ir.tools import infer_type
+
         def get_value(buffer: Expr, offset: Expr):
             buffer_ty = infer_type(buffer)
             if isinstance(buffer_ty, (TensorType, TensorPointerType)):
@@ -60,8 +61,13 @@ class PackEmitter(OpEmitter):
             else:
                 assert isinstance(buffer_ty, PointerType)
                 return deref(buffer + offset)
+
         with self.for_grid(extents) as indices:
-            self.buffer_store(dst.buffer, [register_layout(indices)], math.make_vector(*[get_value(arg.buffer, register_layout(indices)) for arg in args]))
+            self.buffer_store(
+                dst.buffer,
+                [register_layout(indices)],
+                math.make_vector(*[get_value(arg.buffer, register_layout(indices)) for arg in args]),
+            )
 
 
 @register_impl(GetItem)
@@ -72,7 +78,6 @@ class GetItemEmitter(OpEmitter):
         dst: Buffer = output
         vector_type = src.dtype
         assert isinstance(vector_type, VectorType)
-        num_lanes = vector_type.num_lanes
         lane_type = vector_type.lane_type
         assert dst.scope.is_register()
         assert isinstance(dst.layout, TiledTensorLayout)

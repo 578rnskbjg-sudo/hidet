@@ -57,7 +57,19 @@ def data(M, N, K, trans_a=False, trans_b=False, dtype="float16", device="cuda", 
     return a, b, c
 
 
-def f8_quant_data(M, N, K, trans_a=False, trans_b=False, dtype="int8", device="cuda", return_hidet=False, group_m=1, group_n=128, group_k=64):
+def f8_quant_data(
+    M,
+    N,
+    K,
+    trans_a=False,
+    trans_b=False,
+    dtype="int8",
+    device="cuda",
+    return_hidet=False,
+    group_m=1,
+    group_n=128,
+    group_k=64,
+):
     dtype = getattr(torch, dtype)
     lo = -3
     hi = 3
@@ -440,7 +452,9 @@ def test_f8_hopper_gemm_multiple_stage_ss(m, n, k, wgmma_n, group_k=128):
 
     n = cdiv(n, wgmma_n) * wgmma_n
     func = f8_gemm_multiple_stage_ss(m, n, k, wgmma_n=wgmma_n, group_k=group_k)
-    a, b, scale_a, scale_b, c = f8_quant_data(m, n, k, trans_b=True, return_hidet=True, group_m=1, group_n=group_k, group_k=group_k)
+    a, b, scale_a, scale_b, c = f8_quant_data(
+        m, n, k, trans_b=True, return_hidet=True, group_m=1, group_n=group_k, group_k=group_k
+    )
 
     def fn():
         func(a, b, c, scale_a, scale_b)
@@ -455,6 +469,7 @@ def test_f8_hopper_gemm_multiple_stage_ss(m, n, k, wgmma_n, group_k=128):
     torch_scale_b = scale_b.torch()
 
     from vllm import _custom_ops as ops
+
     def fn2():
         return ops.cutlass_scaled_mm(torch_a, torch_b.T, torch_scale_a.T, torch_scale_b.T, out_dtype=torch.bfloat16)
 
@@ -462,8 +477,11 @@ def test_f8_hopper_gemm_multiple_stage_ss(m, n, k, wgmma_n, group_k=128):
     print(f"cutlass:{m}x{n}x{k} took {mean:.2f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
 
     from vllm.model_executor.layers.quantization.utils.fp8_utils import w8a8_block_fp8_matmul
+
     def fn3():
-        return w8a8_block_fp8_matmul(torch_a, torch_b, torch_scale_a.T, torch_scale_b, block_size=[group_k, group_k], output_dtype=torch.bfloat16)
+        return w8a8_block_fp8_matmul(
+            torch_a, torch_b, torch_scale_a.T, torch_scale_b, block_size=[group_k, group_k], output_dtype=torch.bfloat16
+        )
 
     mean = do_bench(fn3, percentiles=None)
     print(f"triton: {m}x{n}x{k} took {mean:.2f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
@@ -474,8 +492,12 @@ def test_f8_hopper_gemm_multiple_stage_ss(m, n, k, wgmma_n, group_k=128):
     import numpy as np
 
     np.set_printoptions(threshold=3000, linewidth=200, edgeitems=100)
-    np.testing.assert_allclose(actual=c.torch().to(torch.float32).cpu().numpy(), desired=c2.to(torch.float32).cpu().numpy(), rtol=1e-2)
-    np.testing.assert_allclose(actual=c2.to(torch.float32).cpu().numpy(), desired=c3.to(torch.float32).cpu().numpy(), rtol=1e-2)
+    np.testing.assert_allclose(
+        actual=c.torch().to(torch.float32).cpu().numpy(), desired=c2.to(torch.float32).cpu().numpy(), rtol=1e-2
+    )
+    np.testing.assert_allclose(
+        actual=c2.to(torch.float32).cpu().numpy(), desired=c3.to(torch.float32).cpu().numpy(), rtol=1e-2
+    )
 
 
 @pytest.mark.requires_cuda_hopper
