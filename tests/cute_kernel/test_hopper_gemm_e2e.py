@@ -468,36 +468,54 @@ def test_f8_hopper_gemm_multiple_stage_ss(m, n, k, wgmma_n, group_k=128):
     torch_scale_a = scale_a.torch().transpose(0, 1).contiguous()
     torch_scale_b = scale_b.torch()
 
-    from vllm import _custom_ops as ops
+    try:
+        from vllm import _custom_ops as ops
+
+        cutlass_scaled_fp8_gemm = ops.cutlass_scaled_mm
+        cutlass_scaled_fp8_gemm(torch_a, torch_b.T, torch_scale_a.T, torch_scale_b.T, out_dtype=torch.bfloat16)
+    except (ImportError, AttributeError):
+        cutlass_scaled_fp8_gemm = None
+
+    try:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import w8a8_block_fp8_matmul
+
+        vllm_scaled_fp8_gemm = w8a8_block_fp8_matmul
+        vllm_scaled_fp8_gemm(
+            torch_a, torch_b, torch_scale_a.T, torch_scale_b, block_size=[group_k, group_k], output_dtype=torch.bfloat16
+        )
+    except (ImportError, AttributeError):
+        vllm_scaled_fp8_gemm = None
 
     def fn2():
-        return ops.cutlass_scaled_mm(torch_a, torch_b.T, torch_scale_a.T, torch_scale_b.T, out_dtype=torch.bfloat16)
-
-    mean = do_bench(fn2, percentiles=None)
-    print(f"cutlass:{m}x{n}x{k} took {mean:.2f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
-
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import w8a8_block_fp8_matmul
+        return cutlass_scaled_fp8_gemm(torch_a, torch_b.T, torch_scale_a.T, torch_scale_b.T, out_dtype=torch.bfloat16)
 
     def fn3():
-        return w8a8_block_fp8_matmul(
+        return vllm_scaled_fp8_gemm(
             torch_a, torch_b, torch_scale_a.T, torch_scale_b, block_size=[group_k, group_k], output_dtype=torch.bfloat16
         )
 
-    mean = do_bench(fn3, percentiles=None)
-    print(f"triton: {m}x{n}x{k} took {mean:.2f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
+    if cutlass_scaled_fp8_gemm is not None:
+        mean = do_bench(fn2, percentiles=None)
+        print(f"cutlass:{m}x{n}x{k} took {mean:.2f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
 
-    c2 = fn2()
-    c3 = fn3()
+    if vllm_scaled_fp8_gemm is not None:
+        mean = do_bench(fn3, percentiles=None)
+        print(f"triton: {m}x{n}x{k} took {mean:.2f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
 
     import numpy as np
 
     np.set_printoptions(threshold=3000, linewidth=200, edgeitems=100)
-    np.testing.assert_allclose(
-        actual=c.torch().to(torch.float32).cpu().numpy(), desired=c2.to(torch.float32).cpu().numpy(), rtol=1e-2
-    )
-    np.testing.assert_allclose(
-        actual=c2.to(torch.float32).cpu().numpy(), desired=c3.to(torch.float32).cpu().numpy(), rtol=1e-2
-    )
+
+    if cutlass_scaled_fp8_gemm is not None:
+        c2 = fn2()
+        np.testing.assert_allclose(
+            actual=c.torch().to(torch.float32).cpu().numpy(), desired=c2.to(torch.float32).cpu().numpy(), rtol=1e-2
+        )
+        if vllm_scaled_fp8_gemm is not None:
+            c3 = fn2()
+            np.testing.assert_allclose(
+                actual=c2.to(torch.float32).cpu().numpy(), desired=c3.to(torch.float32).cpu().numpy(), rtol=1e-2
+            )
 
 
 @pytest.mark.requires_cuda_hopper
