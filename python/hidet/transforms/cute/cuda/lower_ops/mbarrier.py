@@ -14,12 +14,11 @@ from typing import List, Union
 from hidet.ir.expr import Expr, is_constant, var, logical_and, logical_or
 from hidet.ir.dtypes import u64, u32
 
-from hidet.ir.cute import ComposedTensorLayout, TensorLayout, flatten, product_each, right_inverse, idx2crd
+from hidet.ir.cute import ComposedTensorLayout, TensorLayout, product_each, right_inverse, idx2crd
 from hidet.ir.cute.swizzle import Swizzle
 from hidet.ir.cute.ops.copy import MBarriers, MBarrierArrive, MBarrierTryWait, MBarrierWait
 
 from hidet.ir.primitives.cuda.barrier import (
-    mbarrier_arrive_and_expect_tx,
     mbarrier_expect_transaction,
     mbarrier_arrive,
     mbarrier_try_wait,
@@ -108,7 +107,7 @@ class MBarrierArriveEmitter(OpEmitter):
             tid_in_warpgroup = tid % WARPGROUP_SIZE
             signaling_index = var("signaling_index", u32)
             self.declare(signaling_index, tid_in_warpgroup // num_signaling_threads)
-            thread_row = signaling_index // 4 
+            thread_row = signaling_index // 4
             thread_col = signaling_index % 4
             dst_blockid = var("dst_blockid", u32)
             self.declare(dst_blockid, layout(thread_row, thread_col))

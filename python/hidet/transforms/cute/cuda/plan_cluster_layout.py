@@ -15,7 +15,7 @@ This module provides functionality for planning cluster layouts in CUDA code.
 
 
 """
-from typing import Dict, Set
+from typing import Dict, Set, List
 
 from hidet.ir.expr import Var
 from hidet.ir.stmt import DeclareStmt
@@ -35,7 +35,7 @@ class ClusterInfoPlanner(IRVisitor):
         self.var2tensor: Dict[Var, TensorInfo] = var2tensor
 
         self.op2cluster_layout: Dict[Op, TensorLayout] = {}
-        
+
         self.output_var2op: Dict[Var, Op] = {}
         self.adjacent_ops: Dict[Op, Set[Op]] = {}
         self.full_barriers: Set[MBarriers] = set()
@@ -71,7 +71,6 @@ class ClusterInfoPlanner(IRVisitor):
             cluster_stride_b = [d if d >= cluster_m else 0 for d in result_stride]
             self.op2cluster_layout[op_a] = TensorLayout(tuple(result_shape), tuple(cluster_stride_a))
             self.op2cluster_layout[op_b] = TensorLayout(tuple(result_shape), tuple(cluster_stride_b))
-            self.cluster_size = op.cluster_layout.size()
 
     def visit_Copy(self, op: Copy):
         op_src = self.output_var2op[op.src]
@@ -79,7 +78,7 @@ class ClusterInfoPlanner(IRVisitor):
         self.adjacent_ops[op] = {op_src, op_dst}
         self.adjacent_ops[op_src].add(op)
         self.adjacent_ops[op_dst].add(op)
-       
+
         mbarrier = op.mbarrier
         if mbarrier is not None:
             tensor_info = self.var2tensor.get(mbarrier, None)
@@ -124,7 +123,7 @@ class ClusterInfoPlanner(IRVisitor):
             return {}
 
         ready = None
-        for op in self.adjacent_ops.keys():
+        for op, _ in self.adjacent_ops.items():
             if op in self.op2cluster_layout:
                 ready = op
 
@@ -144,7 +143,7 @@ class ClusterInfoPlanner(IRVisitor):
                 self.adjacent_ops.pop(op)
 
             ready = None
-            for op in self.adjacent_ops.keys():
+            for op, _ in self.adjacent_ops.items():
                 if op in self.op2cluster_layout:
                     ready = op
 

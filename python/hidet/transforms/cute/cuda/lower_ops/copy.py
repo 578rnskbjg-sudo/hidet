@@ -121,7 +121,12 @@ class CopyEmitter(OpEmitter):
                             flip_index = cluster_id + flip_layout(i)
                             multicastmask = multicastmask | (Constant(1, u32) << flip_index)
                         cluster_coords = idx2crd(cluster_id, cluster_layout.shape_tuple)
-                        cluster_coords = list(map(lambda x: x[0], filter(lambda x: x[1] == 0, zip(cluster_coords, cluster_layout.stride_tuple))))
+                        cluster_coords = list(
+                            map(
+                                lambda x: x[0],
+                                filter(lambda x: x[1] == 0, zip(cluster_coords, cluster_layout.stride_tuple)),
+                            )
+                        )
                     else:
                         cluster_coords = []
                         multicastmask = None
@@ -142,11 +147,11 @@ class CopyEmitter(OpEmitter):
                         self.append(
                             inst(
                                 dst.buffer + dst.offset,
-                            ~src_tensor_map,
-                            src_coords,
-                            mbarrier=mbarrier.buffer + mbarrier.offset,
+                                ~src_tensor_map,
+                                src_coords,
+                                mbarrier=mbarrier.buffer + mbarrier.offset,
+                            )
                         )
-                    )
                 return
             elif dst.is_tma_buffer():
                 dst_tensor_map = dst.tensor_maps[tma_tensor_idx]

@@ -783,32 +783,32 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
             # Matrix B: Global memory view with strided layout
             b = as_tensor_pointer(b_ptr, "float16", [n, k])
             tg_b = tensor_view(b, TensorLayout((n, k), (k, 1)), "global", (bn, k), (bid_y * bn, 0))
-    
+
             # Allocate shared memory tensors with pipelined layout
             ts_b = make_tensor("float16", layout_auto((bn, bk, k_pipe_max)), "shared")
             ts_a = make_tensor("float16", layout_auto((bm, bk, k_pipe_max)), "shared")
-    
+
             # Initial synchronization to ensure shared memory is ready
-    
+
             # Producer Warp Group: Responsible for data movement from global to shared memory
             with warp_groups_producer([0], num_regs=24):
                 # Pipeline control variables
                 smem_pipe_write = 0
                 write_phase = True
-    
+
                 # Set up tensor partitions for efficient data movement
                 txga = partition_src(tg_a, auto_copy())
                 txsa = partition_dst(ts_a, auto_copy())
                 txgb = partition_src(tg_b, auto_copy())
                 txsb = partition_dst(ts_b, auto_copy())
-    
+
                 # Main producer loop: Move data from global to shared memory
                 k_blocks = cdiv(k, bk)
                 for ko in grid(k_blocks, attrs="u4"):
                     # Wait for previous MMA operations to complete if pipeline is full
                     if ko >= k_pipe_max:
                         mbarrier_wait(mbar_mma[smem_pipe_write], write_phase)
-    
+
                     # Copy data from global to shared memory using TMA
                     copy(
                         auto_copy((bm, bk)),
@@ -822,16 +822,16 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                         txsb[:, :, smem_pipe_write],
                         mbarrier=mbar_tma[smem_pipe_write],
                     )
-    
+
                     # Signal completion of TMA operation
                     mbarrier_arrive(mbar_tma[smem_pipe_write], tma_copy_tx)
-    
+
                     # Update pipeline stage
                     smem_pipe_write += 1
                     if smem_pipe_write == k_pipe_max:
                         smem_pipe_write = 0
                         write_phase = not write_phase
-    
+
             # Consumer Warp Group: Responsible for matrix multiplication computation
             with warp_groups_consumer([1, 2], num_regs=240):
                 # Pipeline control variables
@@ -839,55 +839,62 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                 read_phase = False
                 smem_pipe_release = 0
                 release_phase = False
-    
+
                 # Allocate register tensors for computation
                 tr_a = make_tensor("float16", layout_auto((bm, inst_k * 2)), "register")
                 tr_c = make_tensor("float32", layout_auto((bm, bn)), "register")
                 fill(tr_c, 0.0)  # Initialize accumulation register
-    
+
                 # Set up tensor partitions for computation
                 txra = partition_dst(tr_a, auto_copy())
                 txSa = partition_src(ts_a, auto_copy())
                 txSb = partition_B(ts_b, tiled_mma)
-    
+
                 # Main computation loop
                 k_blocks = cdiv(k, bk)
                 k_tiles = cdiv(bk, inst_k)
-    
+
                 # Initialize WGMMA pipeline
                 wgmma_fence_operand(tr_c)
                 mbarrier_wait(mbar_tma[smem_pipe_read], read_phase)
                 copy(auto_copy(), txSa[:, :, 0, smem_pipe_read], txra[:, :, 0])
-    
+
                 # Main computation loop with pipelined WGMMA operations
                 for ki in grid(k_tiles - 1, attrs="u+"):
                     # Double buffering: Load next tile while computing current tile
                     copy(auto_copy(), txSa[:, :, ki + 1, smem_pipe_read], txra[:, :, (ki + 1) % 2])
                     wgmma_fence()
-    
+
                     # Perform matrix multiplication using WGMMA
-                    mma(tiled_mma, tr_c, txra[:, :, ki % 2], txSb[:, :, ki, smem_pipe_read], tr_c, cluster_layout=cluster_layout)
+                    mma(
+                        tiled_mma,
+                        tr_c,
+                        txra[:, :, ki % 2],
+                        txSb[:, :, ki, smem_pipe_read],
+                        tr_c,
+                        cluster_layout=cluster_layout,
+                    )
                     wgmma_commit_group()
-    
+
                 # Handle last tile of first iteration
                 read_stage = smem_pipe_read
                 smem_pipe_read += 1
                 if smem_pipe_read == k_pipe_max:
                     smem_pipe_read = 0
                     read_phase = not read_phase
-    
+
                 # Complete first iteration
                 wgmma_wait_group(2)
                 wgmma_fence()
                 mma(tiled_mma, tr_c, txra[:, :, (k_tiles - 1) % 2], txSb[:, :, k_tiles - 1, read_stage], tr_c)
                 wgmma_commit_group()
-    
+
                 # Main pipeline loop
                 mbarrier_wait(mbar_tma[smem_pipe_read], read_phase)
                 copy(auto_copy(), txSa[:, :, 0, smem_pipe_read], txra[:, :, 0])
                 wgmma_wait_group(2)
                 wgmma_fence_operand(tr_c)
-    
+
                 # Process remaining blocks with pipelined computation
                 for ko in grid(k_blocks - 2, attrs="u4"):
                     read_stage = smem_pipe_read
@@ -895,7 +902,7 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                     if smem_pipe_read == k_pipe_max:
                         smem_pipe_read = 0
                         read_phase = not read_phase
-    
+
                     wgmma_fence_operand(tr_c)
                     for ki in grid(k_tiles, attrs="u+"):
                         # Load next tile while computing current tile
@@ -904,13 +911,13 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                             copy(auto_copy(), txSa[:, :, 0, smem_pipe_read], txra[:, :, 0])
                         else:
                             copy(auto_copy(), txSa[:, :, ki + 1, read_stage], txra[:, :, (ki + 1) % 2])
-    
+
                         # Perform matrix multiplication
                         wgmma_fence()
                         mma(tiled_mma, tr_c, txra[:, :, ki % 2], txSb[:, :, ki, read_stage], tr_c)
                         wgmma_commit_group()
                         wgmma_wait_group(2)
-    
+
                         # Release shared memory for producer
                         if ki == 1:
                             mbarrier_arrive(mbar_mma[smem_pipe_release])
@@ -920,7 +927,7 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                                 release_phase = not release_phase
                     wgmma_fence_operand(tr_c)
                 wgmma_fence_operand(tr_c)
-    
+
                 # Final computation phase
                 wgmma_fence_operand(tr_c)
                 for ki in grid(k_tiles - 1, attrs="u+"):
@@ -935,19 +942,19 @@ def gemm_multiple_stage_rs_auto(m, n, k, wgmma_n=64, trans_b=True):
                         if smem_pipe_release == k_pipe_max:
                             smem_pipe_release = 0
                             release_phase = not release_phase
-    
+
                 # Complete final computation
                 wgmma_fence()
                 mma(tiled_mma, tr_c, txra[:, :, (k_tiles - 1) % 2], txSb[:, :, k_tiles - 1, smem_pipe_read], tr_c)
                 wgmma_fence_operand(tr_c)
-    
+
                 # Final synchronization
                 wgmma_wait_group(0)
                 mbarrier_arrive(mbar_mma[smem_pipe_release])
-    
+
                 # Convert result to FP16 and prepare for global memory write
                 tr_C = rearrange(cast(tr_c, f16), auto_layout, "register")
-    
+
                 # Write result back to global memory
                 tg_c = tensor_view(
                     c[bid_x * bm : (bid_x + 1) * bm, bid_y * bn : (bid_y + 1) * bn],
@@ -1093,30 +1100,30 @@ def gemm_multiple_stage_ss_auto(m, n, k, wgmma_n=64, trans_b=True):
             # Matrix B: Global memory view with strided layout
             b = as_tensor_pointer(b_ptr, "float16", [n, k])
             tg_b = tensor_view(b, TensorLayout((n, k), (k, 1)), "global", (bn, k), (bid_y * bn, 0))
- 
+
             # Allocate shared memory tensors with pipelined layout
             ts_b = make_tensor("float16", layout_auto((bn, bk, k_pipe_max)), "shared")
             ts_a = make_tensor("float16", layout_auto((bm, bk, k_pipe_max)), "shared")
-    
+
             # Producer Warp Group: Responsible for data movement from global to shared memory
             with warp_groups_producer([2], num_regs=24):
                 # Pipeline control variables
                 smem_pipe_write = 0
                 write_phase = True
-    
+
                 # Set up tensor partitions for efficient data movement
                 txga = partition_src(tg_a, auto_copy())
                 txsa = partition_dst(ts_a, auto_copy())
                 txgb = partition_src(tg_b, auto_copy())
                 txsb = partition_dst(ts_b, auto_copy())
-    
+
                 # Main producer loop: Move data from global to shared memory
                 k_blocks = cdiv(k, bk)
                 for ko in grid(k_blocks, attrs="u4"):
                     # Wait for previous MMA operations to complete if pipeline is full
                     if ko >= k_pipe_max:
                         mbarrier_wait(mbar_mma[smem_pipe_write], write_phase)
-    
+
                     # Copy data from global to shared memory using TMA
                     copy(
                         auto_copy((bm, bk)),
@@ -1130,10 +1137,10 @@ def gemm_multiple_stage_ss_auto(m, n, k, wgmma_n=64, trans_b=True):
                         txsb[:, :, smem_pipe_write],
                         mbarrier=mbar_tma[smem_pipe_write],
                     )
-    
+
                     # Signal completion of TMA operation
                     mbarrier_arrive(mbar_tma[smem_pipe_write], tma_copy_tx)
-    
+
                     # Update pipeline stage
                     smem_pipe_write += 1
                     if smem_pipe_write == k_pipe_max:
@@ -1154,15 +1161,15 @@ def gemm_multiple_stage_ss_auto(m, n, k, wgmma_n=64, trans_b=True):
                 read_phase = False
                 smem_pipe_release = 0
                 release_phase = False
-    
+
                 # Allocate register tensors for computation
                 tr_c = make_tensor("float32", layout_auto((bm, bn)), "register")
                 fill(tr_c, 0.0)  # Initialize accumulation register
-    
+
                 # Set up tensor partitions for computation
                 txSa = partition_A(ts_a, tiled_mma)
                 txSb = partition_B(ts_b, tiled_mma)
-    
+
                 # Main computation loop
                 k_blocks = cdiv(k, bk)
                 k_tiles = cdiv(bk, inst_k)
@@ -1172,12 +1179,19 @@ def gemm_multiple_stage_ss_auto(m, n, k, wgmma_n=64, trans_b=True):
                     mbarrier_wait(mbar_tma[smem_pipe_read], read_phase)
                     wgmma_fence()
                     for ki in grid(k_tiles, attrs="u+"):
-                        mma(tiled_mma, tr_c, txSa[:, :, ki, smem_pipe_read], txSb[:, :, ki, smem_pipe_read], tr_c, cluster_layout=cluster_layout)
+                        mma(
+                            tiled_mma,
+                            tr_c,
+                            txSa[:, :, ki, smem_pipe_read],
+                            txSb[:, :, ki, smem_pipe_read],
+                            tr_c,
+                            cluster_layout=cluster_layout,
+                        )
                     wgmma_commit_group()
                     smem_pipe_read += 1
                     if smem_pipe_read == k_pipe_max:
                         smem_pipe_read = 0
-                        read_phase = not read_phase 
+                        read_phase = not read_phase
                 wgmma_fence_operand(tr_c)
 
                 for ko in grid(k_blocks - k_pipe_mma, attrs="u4"):
@@ -1225,6 +1239,7 @@ def gemm_multiple_stage_ss_auto(m, n, k, wgmma_n=64, trans_b=True):
     return func
 
 
+@pytest.mark.requires_cuda_hopper
 @pytest.mark.parametrize("wgmma_n", [256])
 @pytest.mark.parametrize("m,n,k", [(4096, 4096, 4096)])
 def test_hopper_gemm_multiple_stage_ss_auto(m, n, k, wgmma_n):
@@ -1239,6 +1254,7 @@ def test_hopper_gemm_multiple_stage_ss_auto(m, n, k, wgmma_n):
 
     def fn():
         func(a, b, c)
+
     mean = do_bench(fn, percentiles=None)
     print(f"{m}x{n}x{k} took {mean:.5f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
     func(a, b, c)

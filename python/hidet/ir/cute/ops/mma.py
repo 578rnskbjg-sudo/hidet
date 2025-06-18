@@ -9,7 +9,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict
 
 from hidet.ir.cute.layout import (
     TiledTensorLayout,
@@ -40,7 +40,9 @@ class Mma(Op):
         cluster_layout (TensorLayout): A function maps m and n coordinates to a cluster index.
     """
 
-    def __init__(self, tiled_mma: TiledMma, d: Expr, a: Expr, b: Expr, c: Expr, cluster_layout: TensorLayout = TensorLayout(1)):
+    def __init__(
+        self, tiled_mma: TiledMma, d: Expr, a: Expr, b: Expr, c: Expr, cluster_layout: TensorLayout = TensorLayout(1)
+    ):
         """
         Initialize the Mma operation.
 
