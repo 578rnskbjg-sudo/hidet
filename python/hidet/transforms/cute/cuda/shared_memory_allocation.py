@@ -78,6 +78,8 @@ from hidet.ir.cute.ops import (
     MBarrierArrive,
     MBarrierTryWait,
     MBarrierWait,
+    Partition,
+    SubTensor,
 )
 from hidet.transforms.cute.analysis import TensorAliasAnalysis, TensorInfo
 
@@ -197,6 +199,7 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
         self.forstmt2non_local_tensors: Dict[ForStmt, Dict[Tensor, bool]] = {}
         self.for_stmt_stack: List[ForStmt] = []
         self.shared_memory_size: int = 0
+        self.is_subtensor: Dict[Var, bool] = {}
         self.infer_type = TypeInfer()
 
     def current_for_stmt(self):
@@ -209,8 +212,8 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
         for stmt in self.for_stmt_stack:
             if stmt not in self.forstmt2local_tensors or tensor not in self.forstmt2local_tensors[stmt]:
                 if stmt in self.forstmt2non_local_tensors:
-                    # TODO: fix me
-                    self.forstmt2non_local_tensors[stmt][tensor] = is_reader
+                    if tensor not in self.forstmt2non_local_tensors[stmt]:
+                        self.forstmt2non_local_tensors[stmt][tensor] = is_reader
                 else:
                     self.forstmt2non_local_tensors[stmt] = {tensor: is_reader}
 
@@ -221,8 +224,6 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
             self.tensor2users[tensor] = [op]
 
     def visit_Tensor(self, op: Tensor):
-        # tensor = op
-        # self._insert_tensor_and_user(tensor, op)
         if op.scope.is_shared():
             self.buffers.append(op)
 
@@ -231,7 +232,8 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
 
     def visit_MBarrierArrive(self, op: MBarrierArrive):
         bar_tensor = self.var2tensor[op.mbarrier].tensor
-        self._add_tensor(bar_tensor, False)
+        is_reader = self.is_subtensor.get(op.mbarrier, False)
+        self._add_tensor(bar_tensor, is_reader)
         self._insert_tensor_and_user(bar_tensor, op)
 
     def visit_MBarrierTryWait(self, op: MBarrierTryWait):
@@ -243,29 +245,6 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
         bar_tensor = self.var2tensor[op.mbarrier].tensor
         self._add_tensor(bar_tensor, True)
         self._insert_tensor_and_user(bar_tensor, op)
-
-    # partition and subtensor are not the actual users of the tensor
-    # so we could skip them to have better overlap between the tensors
-    #    def visit_PartitionSrc(self, op: PartitionSrc):
-    #        x_ty = infer_type(op.x)
-    #        if x_ty.scope.is_shared():
-    #            tensor = self.var2tensor[op.x].tensor
-    #            self._add_tensor(tensor)
-    #            self._insert_tensor_and_user(tensor, op)
-    #
-    #    def visit_PartitionDst(self, op: PartitionDst):
-    #        x_ty = infer_type(op.x)
-    #        if x_ty.scope.is_shared():
-    #            tensor = self.var2tensor[op.x].tensor
-    #            self._add_tensor(tensor)
-    #            self._insert_tensor_and_user(tensor, op)
-    #
-    #    def visit_SubTensor(self, op: SubTensor):
-    #        x_ty = infer_type(op.x)
-    #        if x_ty.scope.is_shared():
-    #            tensor = self.var2tensor[op.x].tensor
-    #            self._add_tensor(tensor)
-    #            self._insert_tensor_and_user(tensor, op)
 
     def visit_Rearrange(self, op: Rearrange):
         self.buffers.append(op)
@@ -282,12 +261,14 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
         dst_ty = self.infer_type(op.dst)
         if dst_ty.scope.is_shared():
             dst_tensor = self.var2tensor[op.dst].tensor
-            self._add_tensor(dst_tensor, False)
+            is_reader = self.is_subtensor.get(op.dst, False)
+            self._add_tensor(dst_tensor, is_reader)
             self._insert_tensor_and_user(dst_tensor, op)
         bar_tensor = self.var2tensor.get(op.mbarrier, None)
         if bar_tensor is not None:
             bar_tensor = bar_tensor.tensor
-            self._add_tensor(bar_tensor, False)
+            is_reader = self.is_subtensor.get(op.mbarrier, False)
+            self._add_tensor(bar_tensor, is_reader)
             self._insert_tensor_and_user(bar_tensor, op)
 
     def visit_Mma(self, op: Mma):
@@ -328,6 +309,11 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
                         self.forstmt2local_tensors[current_for_stmt] = [op]
                     else:
                         self.forstmt2local_tensors[current_for_stmt].append(op)
+            elif isinstance(op, SubTensor):
+                coords = op.coord
+                is_subtensor = any(crd is not None for crd in coords)
+                is_parent_subtensor = self.is_subtensor.get(op.x, False)
+                self.is_subtensor[stmt.var] = is_parent_subtensor or is_subtensor
 
     def visit_ForStmt(self, stmt: ForStmt):
         self.for_stmt_stack.append(stmt)
