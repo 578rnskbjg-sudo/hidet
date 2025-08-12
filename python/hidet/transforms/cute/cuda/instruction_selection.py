@@ -75,6 +75,7 @@ from hidet.ir.cute.layout import (
     prefix_product,
     register_tensor_layout,
     filter_zeros,
+    shape_div,
 )
 from hidet.ir.cute.int_tuple import is_tuple, rank, compact_col_major, flatten, depth, idx2crd, product, product_each
 from hidet.utils import initialize
@@ -174,6 +175,8 @@ class CopyInstruction:
 
         src_tv_layout_inst = self.get_layout_in_element(src.buffer, self.src_layout)
         dst_tv_layout_inst = self.get_layout_in_element(dst.buffer, self.dst_layout)
+        if src_tv_layout_inst is None or dst_tv_layout_inst is None:
+            return None
         src_thr_layout_inst, src_val_layout_inst = (src_tv_layout_inst[0], src_tv_layout_inst[1])
         dst_thr_layout_inst, dst_val_layout_inst = (dst_tv_layout_inst[0], dst_tv_layout_inst[1])
 
@@ -218,6 +221,8 @@ class CopyInstruction:
             return None
         src_tv_layout_inst = self.get_layout_in_element(src.buffer, self.src_layout)
         dst_tv_layout_inst = self.get_layout_in_element(dst.buffer, self.dst_layout)
+        if src_tv_layout_inst is None or dst_tv_layout_inst is None:
+            return None
         src_val_layout_inst = src_tv_layout_inst[1]
         dst_val_layout_inst = dst_tv_layout_inst[1]
 
@@ -291,9 +296,12 @@ class CopyInstruction:
         val_rank = rank(layout[1].stride)
         flat_shape = flatten(layout.shape)
         flat_stride = flatten(layout.stride)
+        leading_shape = self.shape[0]
+        if any(s != 1 and d == leading_shape and s % element_bits != 0 for s, d in zip(flat_shape, flat_stride)):
+            return None
         index = range(len(flat_stride))
         sorted_dsi = sorted(zip(flat_stride, flat_shape, index))
-        shape = [s // element_bits if d == self.shape[0] and (s % element_bits == 0) else s for d, s, _ in sorted_dsi]
+        shape = [s // element_bits if d == leading_shape and s != 1 else s for d, s, _ in sorted_dsi]
         stride = []
         for s, (d, _, _) in zip(shape, sorted_dsi):
             if d != 0:

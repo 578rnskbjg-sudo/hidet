@@ -49,6 +49,9 @@ def _do_bench(fn, warmup, rep, percentiles):
 
     if not cuda_available and not hip_available:
         raise RuntimeError("No GPU found")
+    from hidet.ir.dtypes import int32
+
+    cache = hidet.empty((int32(int(256e6)),), dtype="int8", device="cuda")
 
     fn()
     sync()
@@ -71,6 +74,7 @@ def _do_bench(fn, warmup, rep, percentiles):
         fn()
     # Benchmark
     for i in range(n_repeat):
+        cache = cache * 0
         start_event[i].record()
         fn()
         end_event[i].record()

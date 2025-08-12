@@ -26,6 +26,8 @@ from hidet.ir.cute import (
     auto_layout,
     logical_divide,
     product_each,
+    product,
+    flatten,
 )
 
 
@@ -47,6 +49,21 @@ def validate_shape(x_shape: Tuple[int], shape: Tuple[int]):
         return rest_shape, rest_layout
     else:
         return [], TensorLayout(1)
+
+
+def is_tma_partition(shape: Tuple[int], thr_layout: TensorLayout, val_layout: TensorLayout):
+    thr_shape = thr_layout.shape_tuple
+    thr_stride = thr_layout.stride_tuple
+    if len(thr_shape) != 1 or thr_stride[0] != 0:
+        return False
+    val_shape = flatten(val_layout.shape_tuple)
+    val_stride = flatten(val_layout.stride_tuple)
+    sorted_DS = sorted(zip(val_stride, val_shape))
+    val_stride, val_shape = list(zip(*sorted_DS))
+    val_layout_contig = coalesce(TensorLayout(val_shape, val_stride))
+    val_shape = val_layout_contig.shape_tuple
+    val_stride = val_layout_contig.stride_tuple
+    return len(val_shape) == 1 and product(val_shape) == product(shape) and val_stride[0] == 1
 
 
 def infer_type(x_type: BaseType, shape: Tuple[int], thrval_layout: TensorLayout):
@@ -81,7 +98,15 @@ def infer_type(x_type: BaseType, shape: Tuple[int], thrval_layout: TensorLayout)
         tiled_layout = TiledTensorLayout(atom)
         return tiled_tensor(x_type.dtype, tiled_layout, x_type.scope)
     else:
-        _, val_layout = canonicalize_thread_value_layout(thrval_layout)
+        thr_layout, val_layout = canonicalize_thread_value_layout(thrval_layout)
+        # Note: if the partition is using TMA instruction, we reorganize the val layout to keep the dimension information of this tensor
+        if is_tma_partition(shape, thr_layout, val_layout):
+            modes = []
+            remain = val_layout
+            for s in shape:
+                cur, remain = group(remain, s)
+                modes.append(cur)
+            val_layout = make_layout(*modes)
         x_shape = product_each(x_type.layout.shape)
         layouts = [val_layout]
         layouts.extend([TensorLayout(1) for _ in range(len(shape) - 1)])

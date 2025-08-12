@@ -103,6 +103,17 @@ def broadcast_layout(layouts: List[TensorLayout]):
 
     shp = None
     strd = None
+    from hidet.ir.cute.layout import common_reshape, group, make_layout
+
+    layouts = [coalesce(i) for i in layouts]
+    if len(layouts) >= 2:
+        output, _ = common_reshape(layouts[0], layouts[1])
+        for layout in layouts[3:]:
+            output, _ = common_reshape(output, layout)
+        for i, layout in enumerate(layouts):
+            l, _ = common_reshape(layout, output)
+            layouts[i] = l
+
     for layout in layouts:
         if shp is None:
             shp = layout.shape_tuple
@@ -435,12 +446,15 @@ class MultiplyAdd(TernaryOp):
 
 
 class Exp(UnaryOp):
-    def scalar_op(self):
+    @staticmethod
+    def ir_exp(x):
         from hidet.ir.primitives import math
 
-        def ir_exp(x):
-            return math.exp(x)
+        return math.exp(x)
 
+    def scalar_op(self):
+        ir_exp = Exp.ir_exp
+        Exp.ir_exp.__name__ = "exp"
         return ir_exp
 
 
@@ -472,12 +486,15 @@ class Softplus(UnaryOp):
 
 
 class Exp2(UnaryOp):
-    def scalar_op(self):
+    @staticmethod
+    def ir_exp2(x):
         from hidet.ir.primitives import math
 
-        def ir_exp2(x):
-            return math.exp2(x)
+        return math.exp2(x)
 
+    def scalar_op(self):
+        ir_exp2 = Exp2.ir_exp2
+        Exp2.ir_exp2.__name__ = "exp2"
         return ir_exp2
 
 
@@ -520,13 +537,16 @@ class ElementwiseMin(BinaryOp):
 
 
 class ElementwiseMax(BinaryOp):
-    def scalar_op(self):
+    @staticmethod
+    def ir_max(x: Expr, y: Expr):
         from hidet.ir.primitives import math
 
-        def max(x, y):
-            return math.max(x, y)
+        return math.max(x, y)
 
-        return max
+    def scalar_op(self):
+        ir_max = ElementwiseMax.ir_max
+        ElementwiseMax.ir_max.__name__ = "max"
+        return ir_max
 
 
 def arithmetic(*inputs, op: Callable[[Any], Any]):

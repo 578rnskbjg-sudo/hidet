@@ -186,6 +186,10 @@ class ReduceSum(Reduce):
     Reduction operation that computes the sum of elements along a specified axis.
     """
 
+    @staticmethod
+    def ir_add(a: Expr, b: Expr):
+        return a + b
+
     def __init__(self, x: Expr, axis: int):
         """
         Initialize the ReduceSum operation.
@@ -194,11 +198,10 @@ class ReduceSum(Reduce):
             x (Expr): The input expression.
             axis (int): The axis along which to reduce.
         """
+        ir_add = ReduceSum.ir_add
+        ReduceSum.ir_add.__name__ = "add"
 
-        def add(a: Expr, b: Expr):
-            return a + b
-
-        super().__init__(x, axis, add)
+        super().__init__(x, axis, ir_add)
 
     def init(self):
         """
@@ -254,6 +257,12 @@ class ReduceMax(Reduce):
     Reduction operation that computes the maximum of elements along a specified axis.
     """
 
+    @staticmethod
+    def ir_max(a: Expr, b: Expr):
+        from hidet.ir.primitives import math
+
+        return math.max(a, b)
+
     def __init__(self, x: Expr, axis: int):
         """
         Initialize the ReduceMax operation.
@@ -262,13 +271,10 @@ class ReduceMax(Reduce):
             x (Expr): The input expression.
             axis (int): The axis along which to reduce.
         """
+        ir_max = ReduceMax.ir_max
+        ReduceMax.ir_max.__name__ = "max"
 
-        from hidet.ir.primitives import math
-
-        def max(a: Expr, b: Expr):
-            return math.max(a, b)
-
-        super().__init__(x, axis, max)
+        super().__init__(x, axis, ir_max)
 
     def init(self) -> Constant:
         """

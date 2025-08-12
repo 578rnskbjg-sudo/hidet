@@ -183,12 +183,16 @@ class ResolveBankConflict(TensorAliasAnalysis):
 
         verbose = False
 
-        from hidet.logging import logger, setConsoleLevel, DEBUG
+        from hidet.logging import logger, stderr_handler, setConsoleLevel, DEBUG
 
-        origin_level = logger.level
         need_annotate = tensor in self.immutable_tensors
 
+        orig_level = None
+        orig_handler_level = None
         if verbose:
+            orig_level = logger.level
+            orig_handler_level = stderr_handler.level
+            logger.setLevel(DEBUG)
             setConsoleLevel(DEBUG)
             logger.debug("====================================")
             logger.debug(f"resolve {tensor}")
@@ -229,28 +233,28 @@ class ResolveBankConflict(TensorAliasAnalysis):
                 self.copy2conflicts[copy] = bank_conflicts
             elif bank_conflicts > 1:
                 need_resolve = True
-                from .instruction_selection import TmaCopyInstruction
-
-                # For TMA instructions, all four swizzling modes below are valid and can resolve
-                # shared memory bank conflicts during the TMA copy itself.
-                #
-                # However, each swizzling function interacts differently with other copy operations
-                # that use the same shared memory tensor. While all four options avoid bank conflicts
-                # for the TMA transfer, they may introduce or reduce conflicts in other accesses.
-                #
-                # Therefore, we must evaluate all four swizzling configurations and select the one
-                # that minimizes bank conflicts across all shared memory accesses—not just the TMA copy.
-                if isinstance(inst, TmaCopyInstruction):
-                    if len(swizzle_candidates) == 0:
-                        logbits = (src_ty.dtype.nbits - 1).bit_length()
-                        swizzle_candidates = [
-                            Swizzle(0, 7 - logbits, 3),
-                            Swizzle(1, 7 - logbits, 3),
-                            Swizzle(2, 7 - logbits, 3),
-                            Swizzle(3, 7 - logbits, 3),
-                        ]
                 yshft_max = max(int(phase_layout.cosize()).bit_length(), yshft_max)
                 bits_max = max(int(phase_layout.cosize()).bit_length(), bits_max)
+            from .instruction_selection import TmaCopyInstruction
+
+            # For TMA instructions, all four swizzling modes below are valid and can resolve
+            # shared memory bank conflicts during the TMA copy itself.
+            #
+            # However, each swizzling function interacts differently with other copy operations
+            # that use the same shared memory tensor. While all four options avoid bank conflicts
+            # for the TMA transfer, they may introduce or reduce conflicts in other accesses.
+            #
+            # Therefore, we must evaluate all four swizzling configurations and select the one
+            # that minimizes bank conflicts across all shared memory accesses—not just the TMA copy.
+            if isinstance(inst, TmaCopyInstruction):
+                if len(swizzle_candidates) == 0:
+                    logbits = (src_ty.dtype.nbits - 1).bit_length()
+                    swizzle_candidates = [
+                        Swizzle(0, 7 - logbits, 3),
+                        Swizzle(1, 7 - logbits, 3),
+                        Swizzle(2, 7 - logbits, 3),
+                        Swizzle(3, 7 - logbits, 3),
+                    ]
 
         if len(swizzle_candidates) == 0:
             for bits in range(1, bits_max):
@@ -320,7 +324,8 @@ class ResolveBankConflict(TensorAliasAnalysis):
                     bank_conflicts = self._bank_conflicts(composed_layout, elements_per_inst, banks, logger)
                 logger.debug("resolve completed")
                 logger.debug("====================================")
-                setConsoleLevel(origin_level)
+                stderr_handler.setLevel(orig_handler_level)
+                logger.setLevel(orig_level)
             self.tensor2layout[tensor] = ComposedTensorLayout(tensor.layout, 0, swizzle)
 
     def solve(self, func: Function):

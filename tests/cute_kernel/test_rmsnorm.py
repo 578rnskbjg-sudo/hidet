@@ -1,9 +1,10 @@
+from typing import Union
 import hidet
 import torch
 import pytest
 from hidet.ir.cute.layout import TiledTensorLayout, TensorLayout, make_layout, coalesce
 from hidet.ir.cute.layout import ThrValAtom, Level
-from hidet.ir.cute.algorithm import CopyAtom, TiledCopy, MmaAtom, TiledMma
+from hidet.ir.cute.algorithm import CopyAtom, TiledCopy, MmaAtom, TiledMma, auto_copy
 from hidet.ir.cute.ops import (
     make_tensor,
     tensor_view,
@@ -25,13 +26,120 @@ from hidet.ir.cute.ops import (
     broadcast_to,
     fill,
     cute_atomic_add,
+    make_mbarriers,
+    mbarrier_wait,
+    mbarrier_arrive,
 )
+from hidet.ir.cute import layout_auto, auto_layout
 from hidet.lang.mapping import auto_map
 from hidet.ir.primitives.cuda.mutex import release_seq_semaphore, acquire_seq_semaphore
 from hidet.ir.primitives.cuda.atomic import atomic_add, atomic_sub
+from hidet.ir.type import DataType, data_type
 from hidet.utils.py import cdiv
+from hidet.lang.cuda import blockIdx, syncthreads
 
 from quant_utils import bench
+
+
+def transpose(m: int, n: int, threads: int, bm: int, bn: int, dtype: Union[DataType, str] = "float32"):
+    from hidet.lang import attrs
+
+    dtype_ = data_type(dtype)
+    tx = bm * bn * dtype_.nbytes
+
+    with hidet.script_module() as script_module:
+
+        @hidet.script
+        def func(a: dtype_[m, n], b: dtype_[n, m]):
+            attrs.func_kind = "cuda_kernel"
+            attrs.cuda.block_dim = threads
+            attrs.cuda.grid_dim = cdiv(m, bm), cdiv(n, bn)
+            attrs.cuda.dynamic_smem_bytes = 0
+
+            bid_x = blockIdx.x
+            bid_y = blockIdx.y
+
+            # mbar = make_mbarriers(1)
+            tg_a = tensor_view(a, TensorLayout((m, n), (n, 1)), "global", (bm, bn), (bid_x * bm, bid_y * bn))
+            ts_a = make_tensor(dtype_, layout_auto((bm, bn)), "shared")
+            tr_b = make_tensor(dtype_, layout_auto((bm, bn)), "register")
+            tg_b = tensor_view(b, TensorLayout((m, n), (1, m)), "global", (bm, bn), (bid_x * bm, bid_y * bn))
+
+            txga = partition_src(tg_a, auto_copy())
+            txsa = partition_dst(ts_a, auto_copy())
+            copy(auto_copy((bm, bn)), txga, txsa)  # , mbarrier=mbar[0])
+            # mbarrier_arrive(mbar[0], tx)
+            tAsA = partition_src(ts_a, auto_copy())
+            tBrB = partition_dst(tr_b, auto_copy())
+            # mbarrier_wait(mbar[0], False)
+            copy(auto_copy((bm, bn)), tAsA, tBrB)
+            tbrb = partition_src(tr_b, auto_copy())
+            tbgb = partition_dst(tg_b, auto_copy())
+            copy(auto_copy((bm, bn)), tbrb, tbgb)
+
+    func = script_module.build()
+
+    with hidet.script_module() as script_module:
+
+        @hidet.script
+        def func(a: dtype_[m, n], b: dtype_[n, m]):
+            attrs.func_kind = "cuda_kernel"
+            attrs.cuda.block_dim = threads
+            attrs.cuda.grid_dim = cdiv(m, bm), cdiv(n, bn)
+            attrs.cuda.dynamic_smem_bytes = 0
+
+            bid_x = blockIdx.x
+            bid_y = blockIdx.y
+
+            tg_a = tensor_view(a, TensorLayout((m, n), (n, 1)), "global", (bm, bn), (bid_x * bm, bid_y * bn))
+            tr_a = make_tensor(dtype_, layout_auto((bm, bn)), "register")
+            tg_b = tensor_view(b, TensorLayout((m, n), (1, m)), "global", (bm, bn), (bid_x * bm, bid_y * bn))
+
+            txga = partition_src(tg_a, auto_copy())
+            txra = partition_dst(tr_a, auto_copy())
+            copy(auto_copy((bm, bn)), txga, txra)
+            tr_b = rearrange(txra, auto_layout, "register")
+            tbrb = partition_src(tr_b, auto_copy())
+            tbgb = partition_dst(tg_b, auto_copy())
+            copy(auto_copy((bm, bn)), tbrb, tbgb)
+
+    func = script_module.build()
+    return func
+
+    with hidet.script_module() as script_module:
+
+        @hidet.script
+        def func(a: dtype_[m, n], b: dtype_[n, m]):
+            attrs.func_kind = "cuda_kernel"
+            attrs.cuda.block_dim = threads
+            attrs.cuda.grid_dim = cdiv(m, bm), cdiv(n, bn)
+            attrs.cuda.dynamic_smem_bytes = 0
+
+            bid_x = blockIdx.x
+            bid_y = blockIdx.y
+
+            tg_a = tensor_view(a, TensorLayout((m, n), (n, 1)), "global", (bm, bn), (bid_x * bm, bid_y * bn))
+            tr_a = make_tensor(dtype_, layout_auto((bm, bn)), "register")
+            tr_b = make_tensor(dtype_, layout_auto((bm, bn)), "register")
+            ts_a = make_tensor(dtype_, layout_auto((bm, bn)), "shared")
+            tg_b = tensor_view(b, TensorLayout((m, n), (1, m)), "global", (bm, bn), (bid_x * bm, bid_y * bn))
+
+            txga = partition_src(tg_a, auto_copy())
+            txra = partition_dst(tr_a, auto_copy())
+            tArA = partition_src(tr_a, auto_copy())
+            copy(auto_copy((bm, bn)), txga, txra)
+            txsa = partition_dst(ts_a, auto_copy())
+            copy(auto_copy((bm, bn)), tArA, txsa)
+            syncthreads()
+            tAsA = partition_src(ts_a, auto_copy())
+            tBrB = partition_dst(tr_b, auto_copy())
+            copy(auto_copy((bm, bn)), tAsA, tBrB)
+            tbrb = partition_src(tr_b, auto_copy())
+            tbgb = partition_dst(tg_b, auto_copy())
+            copy(auto_copy((bm, bn)), tbrb, tbgb)
+
+    func = script_module.build()
+    return func
 
 
 def fused_add_rmsnorm(batch_size, seqlen, hidden_size, hd_parallel_parts):
@@ -254,3 +362,60 @@ def test_fused_add_rmsnorm(batch_size, seqlen, hidden_size):
     np.set_printoptions(threshold=3000, linewidth=200, edgeitems=100)
     np.testing.assert_allclose(actual=residual.cpu().numpy(), desired=residual2.cpu().numpy(), rtol=1e-2)
     np.testing.assert_allclose(actual=x.cpu().numpy(), desired=x2.cpu().numpy(), rtol=1e-2)
+
+
+if __name__ == "__main__":
+    with hidet.option.context():
+        hidet.option.cache_dir("demo_transpose")
+        hidet.option.save_lower_ir(True)
+        m = 32768
+        n = 32768
+        dtype = "float32"
+        dtype_ = getattr(torch, dtype)
+        op = transpose(m, n, 256, 128, 128, dtype)
+        lo = 0
+        hi = 3
+        x = torch.randint(low=lo, high=hi, size=(m, n), dtype=dtype_, device="cuda")
+        y = torch.randint(low=lo, high=hi, size=(n, m), dtype=dtype_, device="cuda")
+        x = hidet.from_torch(x)
+        y = hidet.from_torch(y)
+        op(x, y)
+
+        def fn():
+            op(x, y)
+
+        from hidet.utils.benchmark import do_bench
+
+        memory = m * n * data_type(dtype).nbytes * 2
+        mean = do_bench(fn, percentiles=None)
+        print("time={:.3f} ms, bandwidth={:.3f} GB/s".format(mean, memory / (1e6 * mean)))
+
+        def fn1():
+            return torch.transpose(x, 1, 0).contiguous()
+
+        memory = m * n * data_type(dtype).nbytes * 2
+        mean = do_bench(fn1, percentiles=None)
+        print("time={:.3f} ms, bandwidth={:.3f} GB/s".format(mean, memory / (1e6 * mean)))
+
+        def graph(a):
+            return torch.transpose(a, 1, 0).contiguous()
+
+        options = {"triton.cudagraphs": False, "epilogue_fusion": True, "max_autotune": True}
+        graph_opt = torch.compile(graph, options=options)
+
+        def fn2():
+            return graph_opt(x)
+
+        memory = m * n * data_type(dtype).nbytes * 2
+        mean = do_bench(fn2, percentiles=None)
+        print("time={:.3f} ms, bandwidth={:.3f} GB/s".format(mean, memory / (1e6 * mean)))
+
+        y2 = torch.transpose(x, 1, 0)
+        print(y2)
+        print(y)
+
+        if m * n <= 1024 * 1024:
+            import numpy as np
+
+            np.set_printoptions(threshold=3000, linewidth=200, edgeitems=100)
+            np.testing.assert_allclose(actual=y.cpu().numpy(), desired=y2.cpu().numpy(), rtol=1e-2)

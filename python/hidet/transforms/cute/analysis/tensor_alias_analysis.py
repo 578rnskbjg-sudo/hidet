@@ -20,7 +20,8 @@ from hidet.ir.func import Function
 from hidet.ir.stmt import DeclareStmt
 from hidet.ir.tools import TypeInfer, infer_type
 
-from hidet.ir.cute import TensorLayout, make_layout
+from hidet.ir.cute import TensorLayout, is_auto_layout, make_layout
+from hidet.ir.cute.layout import AutoLayout
 from hidet.ir.cute.ops import (
     PartitionSrc,
     PartitionDst,
@@ -103,8 +104,12 @@ class TensorInfo:
         if self._dims is None:
             return layout
 
-        modes = [layout[d] for d in self.dims]
-        return make_layout(*modes)
+        shapes = [layout.shape_tuple[d] for d in self.dims]
+        strides = [layout.stride_tuple[d] for d in self.dims]
+        if is_auto_layout(layout):
+            return AutoLayout(shapes, strides)
+        else:
+            return TensorLayout(shapes, strides)
 
     def set_dims(self, dims: List[int]):
         """

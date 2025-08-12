@@ -56,6 +56,11 @@ class SubTensorEmitter(OpEmitter):
             assert src.scope.is_global()
             tile_shape = src.layout[0].shape_tuple
             tile_shape = product_each(tile_shape)
+            if len(tile_shape) != len(src.coords):
+                print(op)
+                print(op.coord)
+                print(tile_shape)
+                print(src.coords)
             assert len(tile_shape) == len(src.coords)
             rank = len(tile_shape)
             crd_layout = TensorLayout(src.layout[rank:].shape_tuple)

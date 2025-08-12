@@ -472,7 +472,7 @@ def test_f8_hopper_gemm_multiple_stage_ss(m, n, k, wgmma_n, group_k=128):
 
         cutlass_scaled_fp8_gemm = ops.cutlass_scaled_mm
         cutlass_scaled_fp8_gemm(torch_a, torch_b.T, torch_scale_a.T, torch_scale_b.T, out_dtype=torch.bfloat16)
-    except (ImportError, AttributeError):
+    except (ImportError, ValueError):
         cutlass_scaled_fp8_gemm = None
 
     try:
@@ -482,7 +482,7 @@ def test_f8_hopper_gemm_multiple_stage_ss(m, n, k, wgmma_n, group_k=128):
         vllm_scaled_fp8_gemm(
             torch_a, torch_b, torch_scale_a.T, torch_scale_b, block_size=[group_k, group_k], output_dtype=torch.bfloat16
         )
-    except (ImportError, AttributeError):
+    except ImportError:
         vllm_scaled_fp8_gemm = None
 
     def fn2():
@@ -1284,6 +1284,7 @@ if __name__ == "__main__":
     test_hopper_gemm_multiple_stage_rs(1024, 1024, 1024, 256)
     test_hopper_gemm_multiple_stage_rs_auto(4096, 4096, 4096, 256)
     test_hopper_gemm_multiple_stage_ss_auto(4096, 4096, 4096, 256)
+    test_hopper_gemm_multiple_stage_ss_auto(4096, 4096, 4096, 256)
     # test_hopper_gemm_multiple_stage_rs_auto(2048, 22016, 2048, 256)
     #    test_hopper_gemm_single_stage_rs(1024, 1024, 192)
     # test_hopper_gemm_multiple_stage_rs_warp_specialized(4096 + 8, 4096 - 8, 4096, 256)
@@ -1305,8 +1306,8 @@ if __name__ == "__main__":
     # test_hopper_gemm_multiple_stage_rs(256, 14336, 4096, 256)
     # test_hopper_gemm_multiple_stage_rs(512, 8192, 512, 256)
     # test_hopper_gemm_multiple_stage_rs(4096, 28672, 8192, 256)
-    # test_f8_hopper_gemm_multiple_stage_ss(4096 + 8, 4096, 7168, 128)
-    # test_f8_hopper_gemm_multiple_stage_ss(4096, 24576, 1536, 128)
-    # test_f8_hopper_gemm_multiple_stage_ss(4096, 4096, 16384, 128)
-    # test_f8_hopper_gemm_multiple_stage_ss(4096, 4096, 4096, 128)
-    # test_f8_hopper_gemm_multiple_stage_ss(4096, 4096, 2048, 128)
+    test_f8_hopper_gemm_multiple_stage_ss(4096, 4096, 7168, 128)
+    test_f8_hopper_gemm_multiple_stage_ss(4096, 24576, 1536, 128)
+    test_f8_hopper_gemm_multiple_stage_ss(4096, 4096, 16384, 128)
+    test_f8_hopper_gemm_multiple_stage_ss(4096, 4096, 4096, 128)
+    test_f8_hopper_gemm_multiple_stage_ss(4096, 4096, 2048, 128)

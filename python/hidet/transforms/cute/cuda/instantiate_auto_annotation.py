@@ -690,6 +690,10 @@ class InferLogicalShape(IRVisitor):
                                 if i_idx < ri:
                                     cur = in_shape[i_idx]
                             else:
+                                if cur % so != 0:
+                                    print(op)
+                                    print(in_shape)
+                                    print(out_shape)
                                 assert cur % so == 0
                                 cur = cur // so
                         else:
@@ -1909,10 +1913,27 @@ class MemoryConstraintsUnifier:
         return TensorLayout(tuple(result_shape), tuple(result_stride))
 
 
+def reorder_dims(layout: TensorLayout, dims: List[int]):
+    assert rank(layout.shape) == len(dims)
+    modes = [layout[d] for d in dims]
+    return make_layout(*modes)
+
+
+def revert_dims(layout: TensorLayout, dims: List[int]):
+    assert rank(layout.shape) == len(dims)
+    modes = [TensorLayout(1) for d in dims]
+    for d, mode in zip(dims, layout):
+        modes[d] = mode
+    return make_layout(*modes)
+
+
 def infer_memory_constraints(ctx: InferContext, tensor_info: TensorInfo, value: TensorLayout, elements_per_inst):
     tensor = tensor_info.tensor
     tensor_memory = tensor_info.layout
     tensor_memory_constraints = ctx.solution.get(tensor, None)
+    # Note: consider the tensor can be transposed, so we should reorder and revert the constraints accordingly
+    if tensor_memory_constraints is not None and tensor_info.dims is not None:
+        tensor_memory_constraints = reorder_dims(tensor_memory_constraints, tensor_info.dims)
     value_inst, _ = group(value, elements_per_inst, filter_zero=False)
     if value_inst is None:
         return None
@@ -1925,11 +1946,15 @@ def infer_memory_constraints(ctx: InferContext, tensor_info: TensorInfo, value: 
         composition(TensorLayout(memory_constraints.shape), value)
     except AssertionError:
         return None
+    if tensor_info.dims is not None:
+        memory_constraints = revert_dims(memory_constraints, tensor_info.dims)
     constr = constraint(tensor, memory_constraints)
     return constr
 
 
 def validate_alignment(value: TensorLayout, memory: TensorLayout, elements_per_inst: int):
+    if value.stride_tuple[0] == 0:
+        return False
     value_layout = composition(memory, value)
     value_reg = TensorLayout(value.shape)
     alignment = max_common_vector(value_layout, value_reg)
@@ -2139,6 +2164,8 @@ class CopyInferRules(InferRules):
 
                 inp_inst: TensorLayout = inst.get_layout_in_element(inp, inp_layout)
                 out_inst: TensorLayout = inst.get_layout_in_element(out, out_layout)
+                if inp_inst is None or out_inst is None:
+                    continue
                 if verbose:
                     logger.debug(f"inst: {inst.apply}")
                     logger.debug(f"out: {out_inst}")
@@ -3151,6 +3178,7 @@ class ResolveAuto(IRVisitor):
           2. `TensorLayout`: The shared memory layout with stride constraints
           Returns `None` if no valid layout satisfying all constraints is found.
         """
+        return None
         # find a shared memory layout such that the rank of the tma tensor is the smallest
         # Step 1. We align the shape of global memory layout and shared memory layout
         last_dim_strides = get_last_dim_strides(tile_shape, global_layout)
@@ -3725,6 +3753,7 @@ class InstantiateAutoAnnotationPass(FunctionPass):
             if key not in str2func:
                 str2func[key] = new_func
         nr_solutions = len(str2func.items())
+        print(f"nr_solutions: {nr_solutions}")
         if nr_solutions == 1:
             return str2func.popitem()[1]
 

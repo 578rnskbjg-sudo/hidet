@@ -228,16 +228,31 @@ def split_shapes(gmem_shape, smem_shape, gmem_stride, smem_stride, max_element_p
             cur_gmem_stride = v
             cur_smem_stride = t
             split_shape_list = []
+            #            def inner_split(shape_list: List[int], index: int):
+            #                shape = shape_list[index]
+            #                if shape > max_element_per_dim:
+            #                    import math
+            #                    smaller = math.floor(math.sqrt(shape))
+            #                    while smaller > 1 and shape % smaller != 0:
+            #                        smaller -= 1
+            #                    larger = shape // smaller
+            #                    assert smaller >= min_element_per_dim and larger >= min_element_per_dim
+            #                    shape_list[index] = smaller
+            #                    rindex = inner_split(shape_list, index)
+            #                    shape_list.insert
             while remain > max_element_per_dim:
                 from hidet.utils.py import gcd
 
                 cur_shape = gcd(remain, max_element_per_dim)
+                remainder = shape_div(remain, cur_shape)
+                while remainder < min_element_per_dim:
+                    remainder *= 2
+                    cur_shape //= 2
                 split_shape_list.append(cur_shape)
                 gmem_shape_.append(cur_shape)
                 smem_shape_.append(cur_shape)
                 gmem_stride_.append(cur_gmem_stride)
                 smem_stride_.append(cur_smem_stride)
-                remain = shape_div(remain, cur_shape)
                 cur_gmem_stride = cur_gmem_stride * cur_shape
                 cur_smem_stride = cur_smem_stride * cur_shape
             if remain > 1:
@@ -286,7 +301,11 @@ def sort_dims(smem_stride, smem_shape, gmem_stride, gmem_shape, index):
             - The sorted global memory shape
             - The permutation of the dimensions
     """
-    max_smem_stride = max(filter(lambda x: is_constant(x), smem_stride))
+    const_smem_stride = list(filter(lambda x: is_constant(x), smem_stride))
+    if len(const_smem_stride) == 0:
+        max_smem_stride = 1
+    else:
+        max_smem_stride = max(const_smem_stride)
     sorted_DS = sorted(
         filter(
             lambda x: not is_constant(x[0]) or x[0] > 0, zip(smem_stride, smem_shape, gmem_stride, gmem_shape, index)

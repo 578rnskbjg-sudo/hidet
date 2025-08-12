@@ -148,9 +148,7 @@ class ClusterInfoPlanner(IRVisitor):
                     ready = op
 
         for mbar in self.mbarriers:
-            print(f"{mbar}")
             if mbar not in self.full_barriers:
-                print(f"{mbar}, {self.consumer_cluster_layout}")
                 self.op2cluster_layout[mbar] = self.consumer_cluster_layout
 
         for arrival, mbar in self.arrival2mbar.items():
