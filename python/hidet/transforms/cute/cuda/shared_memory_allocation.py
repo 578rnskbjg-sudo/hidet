@@ -313,7 +313,8 @@ class SharedMemoryAllocationAnalysis(IRVisitor):
         min_id = self.operation_id[op]
         max_id = min_id + 1
         self.buffer2liveness[op] = Interval(min_id, max_id)
-        self.buffer2size[op] = request_smem_nbytes(op)
+        workspace_size = request_smem_nbytes(op)
+        self.buffer2size[op] = ((workspace_size + 128 - 1) // 128) * 128
 
     def visit_DeclareStmt(self, stmt: DeclareStmt):
         self.visit(stmt.var)
