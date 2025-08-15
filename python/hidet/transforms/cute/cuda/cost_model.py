@@ -927,7 +927,10 @@ class LatencyModel(CostModel):
         if isinstance(inst, TmaCopyInstruction):
             # We assume the memory bank conflicts are automatically resolved by the
             # hardware, so the bank conflicts is always None.
+            rest_smem_layout = annotations["rest_smem_layout"]
+            # FIXME: perf model doesn't correctly model the number of instructions of TMA
             issued_insts = 1
+            # rest_smem_layout.size()
             bank_conflicts = None
         else:
             src_layout = annotations["src_layout"]
