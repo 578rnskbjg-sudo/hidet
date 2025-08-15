@@ -251,7 +251,7 @@ def register_barrier():
                     asm(template, inputs=[barrier], is_volatile=True)
 
             else:
-                template = 'barrier.sync{} %0, %1;'.format('.aligned' if aligned else '')
+                template = 'barrier.{}{} %0, %1;'.format(mode, '.aligned' if aligned else '')
 
                 @script
                 def barrier_func(barrier: int32, count: int32):
