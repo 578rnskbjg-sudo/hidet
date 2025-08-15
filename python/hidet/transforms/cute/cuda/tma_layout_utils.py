@@ -16,7 +16,7 @@ from hidet.ir.expr import is_constant, var
 from hidet.ir.cute import shape_div, common_reshape, group, coalesce, make_layout, TensorLayout
 
 
-def get_last_dim_strides(tile_shape: Tuple[int, ...], global_layout: TensorLayout):
+def check_last_dim_strides(tile_shape: Tuple[int, ...], global_layout: TensorLayout):
     """
     Example and explanation for TMA tensor dimension calculation:
 
@@ -64,23 +64,21 @@ def get_last_dim_strides(tile_shape: Tuple[int, ...], global_layout: TensorLayou
             # determine the dimensions of the TMA tensor. Thus
             # we cannot use TMA and return None.
             if not is_constant(s):
-                return None
+                return False
             # Note: for cases where the shape cannot be divided
             # by the shapes in the global layout, we have to
             # insert additional dimensions to TMA tensors.
             # currently, we just disable these cases for simplicity.
             # TODO: support this in the future.
             if current % s != 0:
-                return None
+                return False
             current = current // s
         if current == 1:
-            last_dim_strides.append(flat_stride[-1])
-        else:
-            last_dim_strides.append(None)
-    return last_dim_strides
+            return False
+    return True
 
 
-def coalesce_per_dim(layout: TensorLayout, shape: Tuple[int, ...], last_dim_strides: List[Optional[int]]):
+def coalesce_per_dim(layout: TensorLayout, shape: Tuple[int, ...]):
     """
     Coalesce the layout per dimension. Add the last dimension strides to each dimension if the last dimension strides
     are not None.
@@ -101,13 +99,23 @@ def coalesce_per_dim(layout: TensorLayout, shape: Tuple[int, ...], last_dim_stri
     """
     layout = coalesce(layout)
     layouts = []
-    for s, d in zip(shape, last_dim_strides):
+    for s in shape[:-1]:
         cur, layout = group(layout, s)
-        if d is not None:
-            cur_shape = cur.shape_tuple + (1,)
-            cur_stride = cur.stride_tuple + (d,)
-            cur = TensorLayout(cur_shape, cur_stride)
+        assert cur is not None
         layouts.append(cur)
+    s = shape[-1]
+    last_shape = layout.shape_tuple
+    last_stride = layout.stride_tuple
+    result_shape = []
+    result_stride = []
+    for i, (s1, d1) in enumerate(zip(last_shape[:-1], last_stride[:-1])):
+        s = shape_div(s, s1)
+        result_shape.append(s1)
+        result_stride.append(d1)
+    if s > 1:
+        result_shape.append(s)
+        result_stride.append(last_stride[-1])
+    layouts.append(TensorLayout(tuple(result_shape), tuple(result_stride)))
     return make_layout(*layouts)
 
 
@@ -244,10 +252,7 @@ def split_shapes(gmem_shape, smem_shape, gmem_stride, smem_stride, max_element_p
                 from hidet.utils.py import gcd
 
                 cur_shape = gcd(remain, max_element_per_dim)
-                remainder = shape_div(remain, cur_shape)
-                while remainder < min_element_per_dim:
-                    remainder *= 2
-                    cur_shape //= 2
+                remain = shape_div(remain, cur_shape)
                 split_shape_list.append(cur_shape)
                 gmem_shape_.append(cur_shape)
                 smem_shape_.append(cur_shape)
@@ -434,3 +439,37 @@ def construct_memory_constraint(
         result_shapes.append(tuple(cur_shapes))
         result_strides.append(tuple(cur_strides))
     return TensorLayout(tuple(result_shapes), tuple(result_strides))
+
+
+def get_tma_dim(smem_shape: List[int], min_element_per_dim: int):
+    tma_dim = 0
+    for s in smem_shape:
+        if s % min_element_per_dim == 0:
+            tma_dim += 1
+            if tma_dim >= 5:
+                return tma_dim
+        else:
+            return tma_dim
+    return tma_dim
+
+
+def get_gmem_bases_and_strides(gmem_shape: List[int], gmem_stride: List[int], tma_dim: int):
+    dim = len(gmem_shape)
+    tma_gmem_strides = [s * d for s, d in zip(gmem_shape, gmem_stride)]
+    basis_strides = [s for s in gmem_shape]
+    restdims = range(tma_dim, dim, 1)
+    restdim2tmadim = {}
+    for d, s, j in sorted(zip(gmem_stride[tma_dim:], gmem_shape[tma_dim:], restdims)):
+        find_dim = False
+        for i in range(tma_dim):
+            if tma_gmem_strides[i] == d:
+                tma_gmem_strides[i] = s * d
+                restdim2tmadim[j] = (i, basis_strides[i])
+                basis_strides[i] *= s
+                find_dim = True
+                break
+        if not find_dim:
+            return False, [], []
+    gmem_bases = [restdim2tmadim[d][0] for d in restdims]
+    gmem_strides = [restdim2tmadim[d][1] for d in restdims]
+    return True, gmem_bases, gmem_strides

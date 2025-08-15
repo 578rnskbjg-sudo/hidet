@@ -283,7 +283,7 @@ from .instruction_selection import (
     expr_to_buffer,
 )
 from .tma_layout_utils import (
-    get_last_dim_strides,
+    check_last_dim_strides,
     coalesce_per_dim,
     common_reshape_per_dim,
     coalesce_gmem_shape_and_smem_shape,
@@ -291,6 +291,8 @@ from .tma_layout_utils import (
     sort_dims,
     make_contiguous_stride,
     construct_memory_constraint,
+    get_tma_dim,
+    get_gmem_bases_and_strides,
 )
 
 
@@ -690,10 +692,6 @@ class InferLogicalShape(IRVisitor):
                                 if i_idx < ri:
                                     cur = in_shape[i_idx]
                             else:
-                                if cur % so != 0:
-                                    print(op)
-                                    print(in_shape)
-                                    print(out_shape)
                                 assert cur % so == 0
                                 cur = cur // so
                         else:
@@ -1890,6 +1888,8 @@ class MemoryConstraintsUnifier:
                     if i < len(flat_shape):
                         size *= flat_shape[i]
         if size > current_idx:
+            if size % current_idx != 0 and current_idx % size != 0:
+                return None
             cur_shape.append(shape_div(size, current_idx))
             cur_stride.append(var("v"))
             result_shape.append(tuple(cur_shape))
@@ -3178,20 +3178,21 @@ class ResolveAuto(IRVisitor):
           2. `TensorLayout`: The shared memory layout with stride constraints
           Returns `None` if no valid layout satisfying all constraints is found.
         """
-        return None
         # find a shared memory layout such that the rank of the tma tensor is the smallest
         # Step 1. We align the shape of global memory layout and shared memory layout
-        last_dim_strides = get_last_dim_strides(tile_shape, global_layout)
+        tma_valid = check_last_dim_strides(tile_shape, global_layout)
+        if not tma_valid:
+            return None
 
-        smem_last_dim_strides = [None] * len(tile_shape)
         if extra_memory_constraints is None:
-            smem_layout = coalesce_per_dim(extra_memory_hint, tile_shape, smem_last_dim_strides)
+            smem_layout = coalesce_per_dim(extra_memory_hint, tile_shape)
         else:
-            smem_layout = coalesce_per_dim(extra_memory_constraints, tile_shape, smem_last_dim_strides)
-        gmem_layout = coalesce_per_dim(gmem_tile_layout, tile_shape, last_dim_strides)
+            smem_layout = coalesce_per_dim(extra_memory_constraints, tile_shape)
+        gmem_layout = coalesce_per_dim(gmem_tile_layout, tile_shape)
 
         divisor = 1
         MAX_ELEMENTS_PER_DIM = 256
+        MIN_ELEMENTS_PER_DIM = 128 // dtype.storage.nbits
         if dtype.is_integer_subbyte():
             divisor = dtype.storage.nbits // dtype.nbits
             MAX_ELEMENTS_PER_DIM = 256 * divisor
@@ -3278,9 +3279,13 @@ class ResolveAuto(IRVisitor):
             smem_stride = smem_layout_.stride
         if smem_stride != 1:
             return None
-        dim = rank(gmem_layout.shape)
-        # tma only supports tensor dimensions less than and equal to 5
-        if dim > 5:
+
+        # all the dimensions must be a multiple of 16 bytes
+        tma_dim = get_tma_dim(smem_shape, MIN_ELEMENTS_PER_DIM)
+        if tma_dim == 0:
+            return None
+        tma_valid, rest_gmem_bases, rest_gmem_strides = get_gmem_bases_and_strides(gmem_shape, gmem_stride, tma_dim)
+        if not tma_valid:
             return None
 
         # Step 4. Convert the shared memory layout candidate to a memory constraint layout.
@@ -3753,7 +3758,7 @@ class InstantiateAutoAnnotationPass(FunctionPass):
             if key not in str2func:
                 str2func[key] = new_func
         nr_solutions = len(str2func.items())
-        print(f"nr_solutions: {nr_solutions}")
+#        print(f"nr_solutions: {nr_solutions}")
         if nr_solutions == 1:
             return str2func.popitem()[1]
 
@@ -3763,6 +3768,7 @@ class InstantiateAutoAnnotationPass(FunctionPass):
 
         model = LatencyModel()
         func2lat: Dict[Function, float] = {}
+        idx = 0
         for _, fn in str2func.items():
             transforms = [instruction_selection_pass(), resolve_bank_conflict_pass()]
             f = None

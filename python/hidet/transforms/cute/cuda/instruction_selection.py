@@ -88,7 +88,9 @@ from .tma_layout_utils import (
     coalesce_gmem_shape_and_smem_shape,
     split_shapes,
     coalesce_per_dim,
-    get_last_dim_strides,
+    check_last_dim_strides,
+    get_tma_dim,
+    get_gmem_bases_and_strides,
 )
 
 
@@ -569,6 +571,7 @@ class TmaCopyInstruction(CopyInstruction):
             smem_layout = dst.layout
 
         swizzle = 'NONE'
+        functor = None
         if isinstance(smem_layout, ComposedTensorLayout):
             functor = smem_layout.functor
             logbits = (src.dtype.nbits - 1).bit_length()
@@ -584,6 +587,7 @@ class TmaCopyInstruction(CopyInstruction):
         if src.dtype.is_integer_subbyte():
             divisor = src.dtype.storage.nbits // src.dtype.nbits
         MAX_ELEMENTS_PER_DIM = 256 * divisor
+        MIN_ELEMENTS_PER_DIM = 128 // src.dtype.storage.nbits
 
         # Step 1. keep the shape of gmem layout and smem layout the same
         gmem_layout, smem_layout = common_reshape_per_dim(gmem_layout, smem_layout)
@@ -635,7 +639,16 @@ class TmaCopyInstruction(CopyInstruction):
         )
         gmem_layout = TensorLayout(tuple(gmem_shape), tuple(gmem_stride))
         smem_layout = TensorLayout(tuple(smem_shape), tuple(smem_stride))
-        box_shape = smem_shape
+        tma_dim = get_tma_dim(smem_shape, MIN_ELEMENTS_PER_DIM)
+        if tma_dim == 0:
+            return None
+        tma_valid, rest_gmem_bases, rest_gmem_strides = get_gmem_bases_and_strides(gmem_shape, gmem_stride, tma_dim)
+        if not tma_valid:
+            return None
+        rest_smem_layout = TensorLayout(tuple(smem_shape[tma_dim:]), tuple(smem_stride[tma_dim:]))
+        if functor is not None:
+            rest_smem_layout = ComposedTensorLayout(rest_smem_layout, 0, functor)
+
         # check if smem layout is contiguous
         smem_layout_ = coalesce(smem_layout)
         if is_tuple(smem_layout_.stride):
@@ -645,10 +658,6 @@ class TmaCopyInstruction(CopyInstruction):
         else:
             smem_stride = smem_layout_.stride
         if smem_stride != 1:
-            return None
-        dim = rank(gmem_layout.shape)
-        # tma only supports tensor dimensions less than and equal to 5
-        if dim > 5:
             return None
 
         # coords_transform is a layout function that converts the global coordinates to
@@ -685,7 +694,7 @@ class TmaCopyInstruction(CopyInstruction):
             coords_transform, shp2crd=f1, permute=permute, dims=dims, shape=smem_shape, split_dims=split_dims
         )
 
-        def extents_transform(*shapes, split_shape_funcs, permute, dims, shape, split_dims):
+        def extents_transform(*shapes, split_shape_funcs, permute, dims, shape, split_dims, rest_gmem_bases):
             shapes = list(shapes)
             rst = []
             for f, s in zip(split_shape_funcs, shapes):
@@ -704,14 +713,37 @@ class TmaCopyInstruction(CopyInstruction):
             for i, shape_list in split_dims.items():
                 d = product(shape_list[:-1])
                 rst[i] = shape_list[:-1] + (rst[i] // d,)
-            return flatten(tuple(rst))
+            rst = list(flatten(tuple(rst)))
+            dim = len(rst)
+            tma_dim = dim - len(rest_gmem_bases)
+            for i, d in enumerate(rest_gmem_bases):
+                rst[d] *= rst[i + tma_dim]
+            rst = tuple(simplify(e) for e in rst)
+            return rst
 
         tma_extents_transform = functools.partial(
-            extents_transform, split_shape_funcs=f2, permute=permute, dims=dims, shape=smem_shape, split_dims=split_dims
+            extents_transform,
+            split_shape_funcs=f2,
+            permute=permute,
+            dims=dims,
+            shape=smem_shape,
+            split_dims=split_dims,
+            rest_gmem_bases=rest_gmem_bases,
         )
 
-        tma_strides = flatten(gmem_layout.stride_tuple)
-        return dim, box_shape, tma_strides, swizzle, tma_extents_transform, tma_coords_transform
+        box_shape = smem_shape[:tma_dim]
+        tma_strides = flatten(gmem_layout.stride_tuple)[:tma_dim]
+        return (
+            tma_dim,
+            box_shape,
+            tma_strides,
+            swizzle,
+            tma_extents_transform,
+            tma_coords_transform,
+            rest_gmem_bases,
+            rest_gmem_strides,
+            rest_smem_layout,
+        )
 
     def __call__(
         self,
@@ -1839,20 +1871,19 @@ class TmaCopyInstructionSelection(IRRewriter):
         src, dst = [expr_to_buffer(arg) for arg in [src, dst]]
 
         # check if the tensor is a tile of a global tensor
-        last_dim_strides = get_last_dim_strides(tile_shape, global_layout)
-        if last_dim_strides is None:
+        tma_valid = check_last_dim_strides(tile_shape, global_layout)
+        if not tma_valid:
             return None
 
         # canonicalize the layout of src and dst
-        smem_last_dim_strides = [None] * len(tile_shape)
         if src.scope.is_global():
-            gmem_layout = coalesce_per_dim(src.layout, tile_shape, last_dim_strides)
-            smem_layout = coalesce_per_dim(dst.layout, tile_shape, smem_last_dim_strides)
+            gmem_layout = coalesce_per_dim(src.layout, tile_shape)
+            smem_layout = coalesce_per_dim(dst.layout, tile_shape)
             src.layout = gmem_layout
             dst.layout = smem_layout
         else:
-            gmem_layout = coalesce_per_dim(dst.layout, tile_shape, last_dim_strides)
-            smem_layout = coalesce_per_dim(src.layout, tile_shape, smem_last_dim_strides)
+            gmem_layout = coalesce_per_dim(dst.layout, tile_shape)
+            smem_layout = coalesce_per_dim(src.layout, tile_shape)
             dst.layout = gmem_layout
             src.layout = smem_layout
 
@@ -1877,7 +1908,18 @@ class TmaCopyInstructionSelection(IRRewriter):
             param_idx = self.expr2param_idx[base_ptr]
             param = self.func_params[param_idx]
             # unpack result
-            inst, dim, box_shape, tma_strides, swizzle, tma_extents_transform, tma_coords_transform = candidate
+            (
+                inst,
+                dim,
+                box_shape,
+                tma_strides,
+                swizzle,
+                tma_extents_transform,
+                tma_coords_transform,
+                rest_gmem_bases,
+                rest_gmem_strides,
+                rest_smem_layout,
+            ) = candidate
             extents = product_each(global_layout.shape_tuple)
             tma_extents = tma_extents_transform(*extents)
 
@@ -1907,6 +1949,9 @@ class TmaCopyInstructionSelection(IRRewriter):
             annotations["inst"] = inst
             annotations["tma_tensor_idx"] = tma_tensor_idx
             annotations["tma_coords_transform"] = tma_coords_transform
+            annotations["rest_gmem_bases"] = rest_gmem_bases
+            annotations["rest_gmem_strides"] = rest_gmem_strides
+            annotations["rest_smem_layout"] = rest_smem_layout
             return e.reforward(args, annotations_update=annotations)
         return super().visit_Copy(e)
 

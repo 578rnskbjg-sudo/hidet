@@ -96,10 +96,13 @@ class CopyEmitter(OpEmitter):
         if isinstance(inst, TmaCopyInstruction):
             tma_tensor_idx = annotations["tma_tensor_idx"]
             tma_coords_transform = annotations["tma_coords_transform"]
+            rest_gmem_bases = annotations["rest_gmem_bases"]
+            rest_gmem_strides = annotations["rest_gmem_strides"]
+            rest_smem_layout = annotations["rest_smem_layout"]
 
             if src.is_tma_buffer():
                 src_tensor_map = src.tensor_maps[tma_tensor_idx]
-                src_coords = tma_coords_transform(*src.coords)
+                src_coords = list(tma_coords_transform(*src.coords))
                 assert mbarrier is not None
                 if "cluster_layout" in annotations:
                     cluster_layout = annotations["cluster_layout"]
@@ -132,26 +135,61 @@ class CopyEmitter(OpEmitter):
                         multicastmask = None
                     cond_vars = cluster_coords + [tid]
                     cond = logical_and(*[crd == 0 for crd in cond_vars])
+                    extents = rest_smem_layout.shape_tuple
+                    dim = len(src_coords)
+                    tma_dim = dim - len(rest_gmem_bases)
                     with self.if_then(cond):
-                        self.append(
-                            inst(
-                                dst.buffer + dst.offset,
-                                ~src_tensor_map,
-                                src_coords,
-                                mbarrier=mbarrier.buffer + mbarrier.offset,
-                                multicastmask=multicastmask,
+                        if len(extents) == 0:
+                            self.append(
+                                inst(
+                                    dst.buffer + dst.offset,
+                                    ~src_tensor_map,
+                                    src_coords,
+                                    mbarrier=mbarrier.buffer + mbarrier.offset,
+                                    multicastmask=multicastmask,
+                                )
                             )
-                        )
+                        else:
+                            with self.for_grid(extents) as indices:
+                                coords = [indices] if len(rest_gmem_bases) == 1 else indices
+                                for idx, (e, i, d) in enumerate(zip(coords, rest_gmem_bases, rest_gmem_strides)):
+                                    src_coords[i] += (e + src_coords[idx + tma_dim]) * d
+                                self.append(
+                                    inst(
+                                        dst.buffer + rest_smem_layout(indices, base=dst.offset),
+                                        ~src_tensor_map,
+                                        src_coords[:tma_dim],
+                                        mbarrier=mbarrier.buffer + mbarrier.offset,
+                                        multicastmask=multicastmask,
+                                    )
+                                )
                 else:
+                    extents = rest_smem_layout.shape
+                    dim = len(src_coords)
+                    tma_dim = dim - len(rest_gmem_bases)
                     with self.if_then(tid == 0):
-                        self.append(
-                            inst(
-                                dst.buffer + dst.offset,
-                                ~src_tensor_map,
-                                src_coords,
-                                mbarrier=mbarrier.buffer + mbarrier.offset,
+                        if len(extents) == 0:
+                            self.append(
+                                inst(
+                                    dst.buffer + dst.offset,
+                                    ~src_tensor_map,
+                                    src_coords,
+                                    mbarrier=mbarrier.buffer + mbarrier.offset,
+                                )
                             )
-                        )
+                        else:
+                            with self.for_grid(extents) as indices:
+                                coords = [indices] if len(rest_gmem_bases) == 1 else indices
+                                for idx, (e, i, d) in enumerate(zip(coords, rest_gmem_bases, rest_gmem_strides)):
+                                    src_coords[i] += (e + src_coords[idx + tma_dim]) * d
+                                self.append(
+                                    inst(
+                                        dst.buffer + rest_smem_layout(indices, base=dst.offset),
+                                        ~src_tensor_map,
+                                        src_coords[:tma_dim],
+                                        mbarrier=mbarrier.buffer + mbarrier.offset,
+                                    )
+                                )
                 return
             elif dst.is_tma_buffer():
                 dst_tensor_map = dst.tensor_maps[tma_tensor_idx]
