@@ -93,7 +93,7 @@ def bar_sync(cooperative_threads: int) -> Call:
         def cuda_bar_sync():
             attrs.func_name = func_name
             attrs.func_kind = 'cuda_internal'
-            template = 'bar.cta.sync 1, {};'.format(cooperative_threads)
+            template = 'bar.cta.sync 0, {};'.format(cooperative_threads)
             asm(template=template)
 
         assert isinstance(cuda_bar_sync, Function)
