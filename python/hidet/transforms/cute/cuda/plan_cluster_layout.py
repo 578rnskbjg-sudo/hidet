@@ -24,7 +24,7 @@ from hidet.ir.func import Function
 from hidet.transforms.base import FunctionPass
 
 from hidet.ir.cute.expr import Op, CallOp
-from hidet.ir.cute.ops import Mma, Copy, Partition, SubTensor, Arithmetic, MBarriers, MBarrierArrive
+from hidet.ir.cute.ops import Mma, Copy, Partition, SubTensor, Arithmetic, MBarriers, MBarrierArrive, Transpose
 from hidet.ir.cute import TensorLayout, right_inverse, product_each, flatten, shape_div
 from hidet.transforms.cute.analysis import TensorInfo, TensorAliasAnalysis
 
@@ -94,7 +94,7 @@ class ClusterInfoPlanner(IRVisitor):
             op = call.op
             self.visit(op)
             self.output_var2op[stmt.var] = op
-            if isinstance(op, (Partition, SubTensor, Arithmetic)):
+            if isinstance(op, (Partition, SubTensor, Arithmetic, Transpose)):
                 for arg in op.args:
                     if isinstance(arg, (list, tuple)):
                         continue

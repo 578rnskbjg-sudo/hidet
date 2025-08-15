@@ -47,11 +47,12 @@ Usage:
 from typing import List, Union
 
 from hidet.ir.expr import Var, Expr, var
-from hidet.ir.tools import infer_type
+from hidet.ir.tools import infer_type, TypeInfer
 from hidet.ir.functors import IRRewriter
 
 from hidet.ir.cute.expr import CallOp
 from hidet.ir.cute.type import TiledTensorType
+from hidet.ir.cute.ops import arithmetic
 
 from hidet.ir.func import Function
 from hidet.transforms.base import FunctionPass
@@ -127,6 +128,7 @@ class Canonicalize(IRRewriter):
         super().__init__()
         self.stmts: List[Stmt] = []
         self.recursion_depth: int = 0
+        self.infer_type = TypeInfer()
 
     def append_stmt(self, stmt: Union[Stmt, Expr]):
         if isinstance(stmt, Expr):
@@ -154,8 +156,17 @@ class Canonicalize(IRRewriter):
         if isinstance(stmt.init, CallOp):
             self.append_stmt(new_stmt)
             return self.flatten_stmts(self.flush_stmts())
-        else:
-            return new_stmt
+        elif isinstance(stmt.init, Var):
+            init_ty = self.infer_type(stmt.init)
+            if isinstance(init_ty, TiledTensorType):
+
+                def assign(a):
+                    return a
+
+                assign.__name__ = "assign"
+                assign_op = arithmetic(init, op=assign)
+                return DeclareStmt(v, assign_op, stmt.is_static, stmt.scope)
+        return new_stmt
 
     def visit_AssignStmt(self, stmt: AssignStmt):
         v = self.visit(stmt.var)
@@ -167,8 +178,17 @@ class Canonicalize(IRRewriter):
         if isinstance(stmt.value, CallOp):
             self.append_stmt(new_stmt)
             return self.flatten_stmts(self.flush_stmts())
-        else:
-            return new_stmt
+        elif isinstance(stmt.value, Var):
+            value_ty = self.infer_type(stmt.value)
+            if isinstance(value_ty, TiledTensorType):
+
+                def assign(a):
+                    return a
+
+                assign.__name__ = "assign"
+                assign_op = arithmetic(value, op=assign)
+                return AssignStmt(v, assign_op)
+        return new_stmt
 
     def visit_LetStmt(self, stmt: LetStmt):
         stmts: List[Stmt] = []
