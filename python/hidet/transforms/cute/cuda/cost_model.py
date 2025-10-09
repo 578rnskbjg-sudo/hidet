@@ -221,6 +221,7 @@ class Opcode(enum.Enum):
     Ldgsts = enum_auto()  # Load from global to shared memory
     Sts = enum_auto()  # Store to shared memory
     Stg = enum_auto()  # Store to global memory
+    Tmastg = enum_auto()  # Store to shared memory to global memory
 
     # Matrix multiplication operations
     Hmma = enum_auto()  # Half-precision matrix multiply-accumulate
@@ -266,6 +267,7 @@ independent_cpi_lut = {
     Opcode.Ldgsts: 2,
     Opcode.Sts: 2,
     Opcode.Stg: 2,
+    Opcode.Tmastg: 2,
     Opcode.Hmma: 8,
     Opcode.Imma: 8,
     Opcode.Wgmma: 8,
@@ -306,6 +308,7 @@ dependent_cpi_lut = {
     Opcode.Ldgsts: 280,
     Opcode.Sts: 19,
     Opcode.Stg: 280,
+    Opcode.Tmastg: 280,
     Opcode.Hmma: 16,
     Opcode.Imma: 16,
     # workaround to bypass unknown arithmetic instructions
@@ -899,6 +902,8 @@ class LatencyModel(CostModel):
             return Opcode.Sts
         elif src_ty.scope.is_register() and dst_ty.scope.is_global():
             return Opcode.Stg
+        elif src_ty.scope.is_shared() and dst_ty.scope.is_global():
+            return Opcode.Tmastg
         else:
             raise NotImplementedError(f"Unsupported opcode for copy({src_ty.scope}, {dst_ty.scope}) operation")
 

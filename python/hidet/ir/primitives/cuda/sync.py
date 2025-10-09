@@ -33,6 +33,19 @@ def register_primitive_functions():
     for name, codegen_name, func_type in functions:
         register_primitive_function(name=name, func_or_type=func_type, codegen_name=codegen_name)
 
+    for cooperative_threads in range(32, 1025, 32):
+        func_name = f'cuda_bar_sync_{cooperative_threads}'
+
+        @script
+        def cuda_bar_sync():
+            attrs.func_name = func_name
+            attrs.func_kind = 'cuda_internal'
+            template = 'bar.cta.sync 0, {};'.format(cooperative_threads)
+            asm(template=template)
+
+        assert isinstance(cuda_bar_sync, Function)
+        register_primitive_function(name=cuda_bar_sync.name, func_or_type=cuda_bar_sync)
+
 
 def syncthreads() -> Call:
     return call_primitive_func('cuda_syncthreads', [])
@@ -87,15 +100,4 @@ def bar_sync(cooperative_threads: int) -> Call:
         raise ValueError(f'cooperating threads in bar.cta.sync must be a multiple of 32, but got {cooperative_threads}')
 
     func_name = f'cuda_bar_sync_{cooperative_threads}'
-    if not is_primitive_function(func_name):
-
-        @script
-        def cuda_bar_sync():
-            attrs.func_name = func_name
-            attrs.func_kind = 'cuda_internal'
-            template = 'bar.cta.sync 0, {};'.format(cooperative_threads)
-            asm(template=template)
-
-        assert isinstance(cuda_bar_sync, Function)
-        register_primitive_function(name=cuda_bar_sync.name, func_or_type=cuda_bar_sync)
     return call_primitive_func(func_name, [])

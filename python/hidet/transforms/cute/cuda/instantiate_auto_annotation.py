@@ -3302,6 +3302,7 @@ class ResolveAuto(IRVisitor):
     def _coalesce_memory_access(self, e: Copy):
         src_ty = self.infer_type(e.src)
         dst_ty = self.infer_type(e.dst)
+        is_dst_gmem = False
         if src_ty.scope.is_global():
             src_tensor = self.var2tensor[e.src]
             gmem_layout = src_tensor.tensor.layout
@@ -3312,6 +3313,7 @@ class ResolveAuto(IRVisitor):
             gmem_layout = dst_tensor.tensor.layout
             gmem_tile_layout = dst_tensor.layout
             dtype = dst_ty.dtype
+            is_dst_gmem = True
 
         current_state = self._current_state()
         shared_tensor_info = None
@@ -3338,7 +3340,9 @@ class ResolveAuto(IRVisitor):
         mbarrier = e.mbarrier
         mask = e.mask
         # Step 1. Try to schedule the copy operation using TMA
-        if shared_tensor is not None and mask is None and mbarrier is not None:
+        tmaldg = mask is None and mbarrier is not None
+        tmastg = mask is None and mbarrier is None
+        if shared_tensor is not None and (tmaldg or tmastg):
             sche = self._schedule_tma_copy(
                 dtype,
                 gmem_layout,
@@ -3758,7 +3762,7 @@ class InstantiateAutoAnnotationPass(FunctionPass):
             if key not in str2func:
                 str2func[key] = new_func
         nr_solutions = len(str2func.items())
-#        print(f"nr_solutions: {nr_solutions}")
+        print(f"nr_solutions: {nr_solutions}")
         if nr_solutions == 1:
             return str2func.popitem()[1]
 

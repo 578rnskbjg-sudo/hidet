@@ -62,7 +62,7 @@ class MBarriersEmitter(OpEmitter):
                 num_threads = (cluster_m + cluster_n - 1) * num_threads // WARPGROUP_SIZE
             with self.for_grid([op.num_barriers]) as i:
                 self.append(mbarrier_init(output.buffer + i, num_threads))
-            self.append(fence_view_async_shared())
+            # self.append(fence_view_async_shared())
             if "cluster_layout" in annotations:
                 self.append(fence_barrier_init())
 
