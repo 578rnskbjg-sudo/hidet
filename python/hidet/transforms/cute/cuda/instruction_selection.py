@@ -976,16 +976,8 @@ class MmaInstruction:
             m_mode, n_mode = group(flat_cvt, inst_m)
             if m_mode is None or n_mode is None:
                 return None, None
-            flat_shape = m_mode.shape_tuple + n_mode.shape_tuple
-            flat_stride = m_mode.stride_tuple + n_mode.stride_tuple
-            mode_m = list(filter_(lambda t: t[1] < m, zip(flat_shape, flat_stride)))
-            mode_n = list(filter_(lambda t: t[1] >= m, zip(flat_shape, flat_stride)))
-            m_shape = tuple(s for s, _ in mode_m)
-            m_stride = tuple(d for _, d in mode_m)
-            n_shape = tuple(s for s, _ in mode_n)
-            n_stride = tuple(d // m for _, d in mode_n)
-            m_mode = coalesce(TensorLayout(m_shape, m_stride))
-            n_mode = coalesce(TensorLayout(n_shape, n_stride))
+            n_stride = tuple(d // m for d in n_mode.stride_tuple)
+            n_mode = coalesce(TensorLayout(n_mode.shape_tuple, n_stride))
             return m_mode, n_mode
 
         # Step 2: split the m_mode, n_mode, and k_mode from the conversion mapping
@@ -1692,6 +1684,30 @@ def register_mma_instruction():
                     trans_a=trans_a,
                 )
             )
+            
+            shape = (n, 64, 32)
+            a = TensorLayout(((128,), (n, 32)), ((0,), (1, n)))
+            b = TensorLayout(((128,), (64, 32)), ((0,), (1, 64)))
+            c = TensorLayout(((4, 8, 4), (2, 2, n // 8)), ((2, n, 16 * n), (1, 8 * n, 8)))
+            mma_instructions.append(
+                WgmmaAsyncInstruction(
+                    wgmma_configs[f"m64n{n}k32_f32_f8e4m3_f8e4m3"],
+                    True,
+                    wgmma_async,
+                    shape,
+                    a,
+                    b,
+                    c,
+                    c,
+                    "f8e4m3",
+                    "f8e4m3",
+                    "f32",
+                    "shared",
+                    "shared",
+                    trans_a=trans_a,
+                )
+            )
+
 
 
 def get_mma_instructions():
