@@ -25,10 +25,10 @@ class CuteContextRewriter(IRRewriter):
             func_var = stmt.expr.func_var
             func_name = func_var.name
             if func_name == "cuda_syncthreads":
-                logger.warning(
+                logger.info(
                     "Function syncthreads cannot appear inside warpgroup context manager"
                     "and will be replaced with bar_sync, which will introduce unexpected"
-                    "behavior. Please double-check the synchronization is expected."
+                    " behavior. Please double-check the synchronization is expected."
                 )
                 return EvaluateStmt(bar_sync(self.context.num_threads))
         return super().visit_EvaluateStmt(stmt)
