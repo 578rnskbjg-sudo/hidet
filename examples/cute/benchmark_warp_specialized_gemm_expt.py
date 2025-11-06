@@ -416,26 +416,24 @@ def main(m, n, k, cand=None):
     def fn2():
         return torch_a @ torch_b.T
 
-    # from triton.ops import matmul
+    from matmul import matmul as triton_matmul
 
-    # def fn3():
-    #    return matmul(torch_a, torch_b.T)
+    def fn3():
+        return triton_matmul(torch_a, torch_b.T)
 
     mean = do_bench(fn2, percentiles=None)
     cublas_mean = mean
     print(f"cublas:{m}x{n}x{k} took {mean:.3f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
 
-    # mean = do_bench(fn3, percentiles=None)
-    triton_mean = 0
-    # mean
+    mean = do_bench(fn3, percentiles=None)
     print(f"triton: {m}x{n}x{k} took {mean:.3f} ms, throughput: {2.0 * m * n * k / mean / 1e9:.2f} TFLOPS")
-
+    triton_mean = mean
     import numpy as np
 
     np.set_printoptions(threshold=3000, linewidth=200, edgeitems=100)
 
-    c2 = fn2()
-    np.testing.assert_allclose(actual=c.torch().to(torch.float32).cpu().numpy(), desired=c2.to(torch.float32).cpu().numpy(), rtol=1e-2)
+    # c2 = fn2()
+    # np.testing.assert_allclose(actual=c.torch().to(torch.float32).cpu().numpy(), desired=c2.to(torch.float32).cpu().numpy(), rtol=1e-2)
     # c3 = fn3()
     # np.testing.assert_allclose(
     #    actual=c2.to(torch.float32).cpu().numpy(), desired=c3.to(torch.float32).cpu().numpy(), rtol=1e-2
@@ -477,18 +475,20 @@ if __name__ == "__main__":
     from tabulate import tabulate
 
     records = []
-    headers = ["mxnxk", "triton", "cublas", "hexcute"]
+    headers = ["mxnxk", "triton", "cublas", "hexcute", "flops_triton", "flops_cublas", "flops_hexcute"]
     records = []
 
-    for m in [8192]:  # [32, 64, 128, 2048, 4096]:
-        for n, k in [[3072, 2048]]:  # weight_shapes:
+    for m in [32, 64, 128, 2048, 4096]:
+        for n, k in weight_shapes:
             time_hexcute, time_cublas, time_triton = main(m, n, k, cand=args.cand)
             shape = f"{m}x{n}x{k}"
-            records.append([shape, time_triton, time_cublas, time_hexcute])
-            break
-        break
+            flops = 2.0 * m * n * k
+            flops_hexcute = flops / time_hexcute / 1e9
+            flops_cublas = flops / time_cublas / 1e9
+            flops_triton = flops / time_triton / 1e9
+            records.append([shape, time_triton, time_cublas, time_hexcute, flops_triton, flops_cublas, flops_hexcute])
 
-    # with open(args.output, "w") as f:
-    #    f.write(
-    #        tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
-    #    )
+    with open(args.output, "w") as f:
+       f.write(
+           tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
+       )

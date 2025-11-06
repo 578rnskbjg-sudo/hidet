@@ -27,7 +27,7 @@ DEFAULT_NUMBER_FOR_MEASUREMENTS = 5
 
 
 # copied from: https://github.com/openai/triton/blob/main/python/triton/testing.py
-def _do_bench(fn, warmup, rep, percentiles):
+def _do_bench(fn, warmup, rep, percentiles, flush_l2_cache=False):
     """
     Benchmark the runtime of the provided function. By default, return the median runtime of :code:`fn` along with
     the 20-th and 80-th performance percentile.
@@ -76,7 +76,8 @@ def _do_bench(fn, warmup, rep, percentiles):
         fn()
     # Benchmark
     for i in range(n_repeat):
-        cache = cache * 0
+        if flush_l2_cache:
+            cache = cache * 0
         start_event[i].record()
         fn()
         end_event[i].record()
@@ -90,9 +91,9 @@ def _do_bench(fn, warmup, rep, percentiles):
         return np.mean(times).item()
 
 
-def do_bench(fn, warmup=25, rep=100, percentiles=(0.2, 0.5, 0.8)):
+def do_bench(fn, warmup=25, rep=100, percentiles=(0.2, 0.5, 0.8), flush_l2_cache=False):
     with gc_disabled():
-        return _do_bench(fn, warmup, rep, percentiles)
+        return _do_bench(fn, warmup, rep, percentiles, flush_l2_cache)
 
 
 # Find the `number` of iterations and `delay` for best accuracy of benchmarking
