@@ -315,10 +315,12 @@ class WarpSpecializedGemm:
                         for i in range(epilogue_stages):
                             copy(auto_copy((bm, 16)), tcrc[:, :, i], tcsc)
                             syncthreads()
+                            fence_view_async_shared()
                             copy(auto_copy((bm, 16)), tCsC, tCgC[:, :, i])
                             copy_bulk_commit_group()
                             copy_bulk_wait_group(0)
                             syncthreads()
+                            fence_view_async_shared()
                         for ko in range(k_pipe_mma):
                             mbarrier_arrive(mbar_mma[smem_pipe_release])
                             smem_pipe_release += 1
@@ -404,7 +406,6 @@ def main(m, n, k, cand=None):
 
     mean = do_bench(fn, percentiles=None)
     flops = 2.0 * m * n * k
-    memory = f8e4m3.nbytes * (m * k + k * n) + f16.nbytes * m * n
     print("Hexcute: time={:.3f} ms, performance={:.3f} TFLOPS".format(mean, flops / (1e9 * mean)))
     hexcute_mean = mean
 
@@ -478,6 +479,10 @@ if __name__ == "__main__":
     headers = ["mxnxk", "triton", "cublas", "hexcute", "flops_triton", "flops_cublas", "flops_hexcute"]
     records = []
 
+    triton = []
+    cublas = []
+    hexcute = []
+        
     for m in [32, 64, 128, 2048, 4096]:
         for n, k in weight_shapes:
             time_hexcute, time_cublas, time_triton = main(m, n, k, cand=args.cand)
@@ -487,8 +492,85 @@ if __name__ == "__main__":
             flops_cublas = flops / time_cublas / 1e9
             flops_triton = flops / time_triton / 1e9
             records.append([shape, time_triton, time_cublas, time_hexcute, flops_triton, flops_cublas, flops_hexcute])
+            triton.append(flops_triton)
+            cublas.append(flops_cublas)
+            hexcute.append(flops_hexcute)
 
     with open(args.output, "w") as f:
        f.write(
            tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
        )
+
+    methods = ['Hexcute', 'FlashAttention', 'FlashInfer', 'Triton', 'CUTLASS', 'cuBLAS']
+    clist = ['#b5739d', '#7ea6e0', '#67ab9f', '#ea6b66', '#ffb570', '#97d077']
+    my_colors = {}
+    for i, method in enumerate(methods):
+        my_colors[method] = clist[i]
+   
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib import rc     
+    rc('font', **{'family': 'sans-serif', 'size': 25})
+    import numpy as np
+
+    # Data for each method
+    methods = ['Triton', 'cuBLAS', 'Hexcute']
+
+    fig, ax = plt.subplots(1, 1, figsize=(30, 4))
+    
+    print(len(triton))
+    print(len(cublas))
+    print(len(hexcute))
+    categories = [f"M{m}" for m in range(len(cublas))]
+    width = 0.2         # Width of the bars
+    N = len(categories)
+    ind = np.arange(N)  # X locations for the groups
+    
+    import numpy as np
+    cmap = plt.get_cmap('gnuplot')
+    ll = cmap.N*8//9
+    len_methods = len(methods)
+    indices = np.linspace(ll//5, ll, len_methods)
+ 
+    gap = 0.012
+    i = 0
+    ax.bar(ind + (i + 0.5) * (width + gap), triton, width, label=methods[i], color=my_colors[methods[i]])
+    i = 1
+    ax.bar(ind + (i + 0.5) * (width + gap), cublas, width, label=methods[i], color=my_colors[methods[i]])
+    i = 2
+    ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods[i], color=my_colors[methods[i]])
+ 
+    ax.set_ylabel('Throughput (TFLOPS)', fontsize=18)
+    ax.set_ylim(0, 550)
+    ax.set_xlabel('F16 Warp Specialized GEMM Layers', fontsize=18)
+    ax.set_xticks(ind + (len(methods) * width) / 2)
+    ax.set_yticks(np.arange(0, 550, 55))
+    ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
+    ax.set_xticklabels(categories, fontsize=18)
+    # title_loc = -0.2
+    #ax.set_title('FP16xINT4 MoE Layer', fontsize=18)
+    ax.yaxis.grid(True, linestyle='dotted')
+
+    lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
+    lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+    x = set()
+    lins = []
+    labs = []
+    for li, la in zip(lines, labels):
+        if la in x:
+            continue
+        x.add(la)
+        lins.append(li)
+        labs.append(la)
+    fig.legend(lins, labs, loc='upper left', bbox_to_anchor=(0.053, 0.95), fontsize=14, ncols=3)
+
+    fig.subplots_adjust(
+            top=0.94,
+            bottom=0.173,
+            left=0.053,
+            right=0.99,
+            hspace=0.2,
+            wspace=0.2
+        )
+    # Adjust layout to prevent clipping of tick-labels
+    plt.savefig(args.output.replace('.txt', '.pdf'), dpi=300, bbox_inches='tight')

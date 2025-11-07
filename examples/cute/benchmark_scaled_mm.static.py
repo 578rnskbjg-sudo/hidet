@@ -72,6 +72,32 @@ class W8A8ScaledMM:
     def modules(self):
         return tune.extract_ir_modules(self._candidates)
 
+    def build(self):
+        from hashlib import sha256
+        from hidet.drivers import build_ir_module
+        from hidet.runtime import load_compiled_module
+        from tqdm import tqdm
+        from hidet.utils.multiprocess import parallel_imap_2ndlevel
+
+        def build_job(args):
+            ir_module, output_dir = args
+            build_ir_module(ir_module, output_dir, target='cuda')
+
+        ir_modules = self.modules()
+        output_dirs = []
+        for mod in ir_modules:
+            hash_dir = sha256(str(mod).encode()).hexdigest()[:16]
+            output_dir = hidet.utils.cache_dir('ir_modules', hash_dir)
+            output_dirs.append(output_dir)
+
+        jobs = [(ir_module, output_dir) for ir_module, output_dir in zip(ir_modules, output_dirs)]
+
+        for _ in tqdm(parallel_imap_2ndlevel(build_job, jobs, is_remote_allowed=True), desc="Compiling", total=len(jobs), ncols=80):
+            pass
+        funcs = [load_compiled_module(output_dir) for output_dir in output_dirs]
+        return list(zip(ir_modules, funcs))
+
+
     @tune.space(
         2, cluster_m=[1, 2, 4, 8, 16], cluster_n=[1, 2, 4, 8, 16], tiled_mma=_tiled_mma_lists, k_pipe_max=[4, 5, 6, -1]
     )
@@ -323,7 +349,7 @@ class W8A8ScaledMM:
 
 def w8a8_scaled_mm(m, n, k, group_n, group_k):
     scaled_mm_kernel = W8A8ScaledMM(m, n, k, group_n, group_k)
-    return scaled_mm_kernel.modules()
+    return scaled_mm_kernel.build()
 
 
 def f8_quant_data(
@@ -362,7 +388,7 @@ def f8_quant_data(
 
 def main(m, n, k, group_m, group_n, group_k, cand=None):
     print(f"m: {m}, n: {n}, k: {k}, group_m: {group_m}, group_n: {group_n}, group_k: {group_k}")
-    modules = w8a8_scaled_mm(m, n, k, group_n, group_k)
+    artifacts = w8a8_scaled_mm(m, n, k, group_n, group_k)
     a, b, scale_a, scale_b, c = f8_quant_data(
         m, n, k, trans_b=True, return_hidet=True, group_m=1, group_n=group_n, group_k=group_k
     )
@@ -371,11 +397,9 @@ def main(m, n, k, group_m, group_n, group_k, cand=None):
     best_i = None
     best_func = None
 
-    for i, mod in enumerate(modules):
+    for i, (mod, func) in enumerate(artifacts):
         if cand is not None and i != cand:
             continue
-
-        func = mod.build()
 
         cluster_m = mod._tuning_kwargs["cluster_m"]
         cluster_n = mod._tuning_kwargs["cluster_n"]
@@ -517,19 +541,108 @@ if __name__ == "__main__":
     from tabulate import tabulate
 
     records = []
-    headers = ["mxnxk", "triton", "cutlass", "hexcute"]
-    records = []
+    headers = ["mxnxk", "triton", "cutlass", "hexcute", "flops_triton", "flops_cutlass", "flops_hexcute"]
+
+    triton = []
+    cutlass = []
+    hexcute = []
 
     for m in [32, 64, 128, 2048, 4096]:
         for n, k in weight_shapes:
+            flops = 2.0 * m * n * k
             time_hexcute, time_cutlass, time_triton = main(m, n, k, group_m, group_n, group_k)
+            flops_hexcute = flops / time_hexcute / 1e9
+            flops_cutlass = flops / time_cutlass / 1e9
+            flops_triton = flops / time_triton / 1e9
             shape = f"{m}x{n}x{k}"
-            records.append([shape, time_triton, time_cutlass, time_hexcute])
-
+            records.append([shape, time_triton, time_cutlass, time_hexcute, flops_triton, flops_cutlass, flops_hexcute])
+            triton.append(flops_triton)
+            cutlass.append(flops_cutlass)
+            hexcute.append(flops_hexcute)
+    
     with open(args.output, "w") as f:
         f.write(
             tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
         )
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib import rc     
+    methods = ['Hexcute', 'FlashAttention', 'FlashInfer', 'Triton', 'CUTLASS', 'cuBLAS']
+    
+    clist = ['#b5739d', '#7ea6e0', '#67ab9f', '#ea6b66', '#ffb570', '#97d077']
+    my_colors = {}
+    for i, method in enumerate(methods):
+        my_colors[method] = clist[i]
+ 
+    rc('font', **{'family': 'sans-serif', 'size': 25})
+
+    # Data for each method
+    methods = ['Triton', 'CUTLASS', 'Hexcute']
+
+    # Latency for each matrix type
+    triton = [  9.78,  24.40,  11.93,  19.57,  10.10,  17.32,  10.22, 19.17,   48.80,  23.86, 38.74, 19.99,  35.35, 20.64, 38.74,  92.92, 44.28,  73.69,  40.41, 73.10, 40.90,   150.70, 214.45,   188.79,  185.30,  213.22,  174.19,  195.78,  178.43,  221.04,  193.03,  201.10, 218.256, 196.27, 217.81]
+    cutlass = [14.91,  43.92,  20.65,  29.82,  18.07,  50.53,  19.88, 29.83,   89.48,  41.29, 60.61, 36.14, 101.06, 36.40, 60.61, 178.96, 82.60, 119.30, 72.27, 202.12, 79.536, 522.865, 687.194, 467.479, 643.096, 683.290, 643.742, 624.722, 639.675, 693.357, 475.567, 675.612, 699.180, 616.318, 690.648]
+    hexcute = [18.42, 56.184, 26.189, 38.348, 24.090, 68.174, 24.970, 38.34, 102.805, 52.377, 75.16, 46.98, 122.71, 47.72, 79.96, 197.22, 89.48, 156.59, 96.36, 241.97, 95.44,  583.781, 566.37,  234.53,  683.29,  583.781, 656.581, 613.566, 653.581, 578.014, 240.277, 699.180, 598.303, 695.893, 657.602]
+
+    fig, ax = plt.subplots(1, 1, figsize=(30, 4))
+    
+    print(len(triton))
+    print(len(cutlass))
+    print(len(hexcute))
+    categories = [f"M{m}" for m in range(len(cutlass))]
+    width = 0.2         # Width of the bars
+    N = len(categories)
+    ind = np.arange(N)  # X locations for the groups
+    
+    import numpy as np
+    cmap = plt.get_cmap('gnuplot')
+    ll = cmap.N*8//9
+    len_methods = len(methods)
+    indices = np.linspace(ll//5, ll, len_methods)
+    
+    gap = 0.012
+    i = 0
+    ax.bar(ind + (i + 0.5) * (width + gap), triton, width, label=methods[i], color=my_colors[methods[i]])
+    i = 1
+    ax.bar(ind + (i + 0.5) * (width + gap), cutlass, width, label=methods[i], color=my_colors[methods[i]])
+    i = 2
+    ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods[i], color=my_colors[methods[i]])
+ 
+    ax.set_ylabel('Throughput (TFLOPS)', fontsize=18)
+    ax.set_ylim(0, 750)
+    ax.set_xlabel('FP8 Block Scaled GEMM Layers', fontsize=18)
+    ax.set_xticks(ind + (len(methods) * width) / 2)
+    ax.set_yticks(np.arange(0, 750, 75))
+    ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
+    ax.set_xticklabels(categories, fontsize=18)
+    # title_loc = -0.2
+    #ax.set_title('FP16xINT4 MoE Layer', fontsize=18)
+    ax.yaxis.grid(True, linestyle='dotted')
+
+    lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
+    lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+    x = set()
+    lins = []
+    labs = []
+    for li, la in zip(lines, labels):
+        if la in x:
+            continue
+        x.add(la)
+        lins.append(li)
+        labs.append(la)
+    fig.legend(lins, labs, loc='upper left', bbox_to_anchor=(0.053, 0.95), fontsize=14, ncols=3)
+
+    fig.subplots_adjust(
+            top=0.94,
+            bottom=0.173,
+            left=0.053,
+            right=0.99,
+            hspace=0.2,
+            wspace=0.2
+        )
+    # Adjust layout to prevent clipping of tick-labels
+    plt.savefig(args.output.replace(".txt", ".pdf"), dpi=300, bbox_inches='tight')
 
 
 def func(

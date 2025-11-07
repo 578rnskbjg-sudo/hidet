@@ -1061,7 +1061,9 @@ if __name__ == "__main__":
 
     records = []
     headers = ["batch_size", "num_heads", "num_heads_k", "head_size", "seqlen_q", "seqlen_k", "hexcute", "triton", "flash-atten"]
-    records = []
+    triton = []
+    flashattn = []
+    hexcute = []
 
     for batch_size in [1]:
         for num_heads in [16, 32]:
@@ -1072,6 +1074,13 @@ if __name__ == "__main__":
                     mean_hexcute, mean_triton, mean_flash_atten = main(
                         batch_size, num_heads, num_heads_k, head_size, seqlen_q, seqlen_k, sm_ver
                     )
+                    flops = 2.0 * (
+                        batch_size * seqlen_q * num_heads * seqlen_k * head_size
+                        + batch_size * seqlen_q * num_heads_k * seqlen_k * head_size
+                    )
+                    flops_hexcute = flops / mean_hexcute / 1e9
+                    flops_triton = flops / mean_triton / 1e9
+                    flops_flash_atten = flops / mean_flash_atten / 1e9
                     records.append(
                         [
                             batch_size,
@@ -1085,8 +1094,85 @@ if __name__ == "__main__":
                             mean_flash_atten,
                         ]
                     )
+                    hexcute.append(flops_hexcute)
+                    triton.append(flops_triton)
+                    flashattn.append(flops_flash_atten)
 
     with open(args.output, "w") as f:
         f.write(
             tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
         )
+
+    import matplotlib.pyplot as plt
+    from matplotlib import rc     
+    rc('font', **{'family': 'sans-serif', 'size': 25})
+    import numpy as np
+    methods = ['Hexcute', 'FlashAttention', 'FlashInfer', 'Triton', 'CUTLASS', 'cuBLAS']
+    
+    clist = ['#b5739d', '#7ea6e0', '#67ab9f', '#ea6b66', '#ffb570', '#97d077']
+    #clist = ['#38761D', '#4285F4', '#EA4335', '#ea6b66', '#ffb570', '#97d077']
+    my_colors = {}
+    for i, method in enumerate(methods):
+        my_colors[method] = clist[i]
+
+    # Data for each method
+    methods = ['Triton', 'FlashAttention', 'Hexcute']
+
+    fig, ax = plt.subplots(1, 1, figsize=(30, 4))
+
+    print(len(triton))
+    print(len(flashattn))
+    print(len(hexcute))
+    categories = [f"M{m}" for m in range(len(flashattn))]
+    N = len(categories)
+    ind = np.arange(N)  # X locations for the groups
+    width = 0.2         # Width of the bars
+
+    import numpy as np
+    cmap = plt.get_cmap('gnuplot')
+    ll = cmap.N*8//9
+    len_methods = len(methods)
+    indices = np.linspace(ll//5, ll, len_methods)
+    
+    gap = 0.012
+    i = 0
+    ax.bar(ind + (i + 0.5) * (width + gap), triton, width, label=methods[i], color=my_colors[methods[i]])
+    i = 1
+    ax.bar(ind + (i + 0.5) * (width + gap), flashattn, width, label=methods[i] + '3', color=my_colors[methods[i]])
+    i = 2
+    ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods[i], color=my_colors[methods[i]])
+ 
+    ax.set_ylabel('Throughput (TFLOPS)', fontsize=18)
+    ax.set_ylim(0, 450)
+    ax.set_xlabel('Fused Multi-head Attention Forward Layers', fontsize=18)
+    ax.set_xticks(ind + (len(methods) * width) / 2)
+    ax.set_yticks(np.arange(0, 450, 50))
+    ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
+    ax.set_xticklabels(categories, fontsize=18)
+    # title_loc = -0.2
+    #ax.set_title('FP16xINT4 MoE Layer', fontsize=18)
+    ax.yaxis.grid(True, linestyle='dotted')
+
+    lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
+    lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+    x = set()
+    lins = []
+    labs = []
+    for li, la in zip(lines, labels):
+        if la in x:
+            continue
+        x.add(la)
+        lins.append(li)
+        labs.append(la)
+    fig.legend(lins, labs, loc='upper left', bbox_to_anchor=(0.056, 0.95), fontsize=14, ncols=3)
+
+    fig.subplots_adjust(
+            top=0.94,
+            bottom=0.173,
+            left=0.056,
+            right=0.99,
+            hspace=0.2,
+            wspace=0.2
+        )
+    # Adjust layout to prevent clipping of tick-labels
+    plt.savefig(args.output.replace('.txt', '.pdf'), dpi=300, bbox_inches='tight')
