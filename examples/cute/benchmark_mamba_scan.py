@@ -1188,7 +1188,7 @@ def test1():
     print(f"selective scan time (vLLM): {time} ms, memory bandwidth: {memory_total / time / 1e6} GB/s")
 
 
-def test2(batch_size: int, seqlen: int):
+def test2(batch_size: int, seqlen: int, verify_result: bool = True):
     hidet.option.num_local_workers(1)
     d = 5120
     n = 32
@@ -1205,7 +1205,7 @@ def test2(batch_size: int, seqlen: int):
     print(query_start_loc)
     cache_indices = torch.zeros((batch_size), dtype=torch.int32, device="cuda")
     for i in range(batch_size):
-        cache_indices[i] = max_batch_size - 1
+        cache_indices[i] = i
     has_initial_state = torch.ones((batch_size), dtype=torch.int32, device="cuda")
     has_initial_state = has_initial_state.to(torch.bool)
 
@@ -1236,8 +1236,9 @@ def test2(batch_size: int, seqlen: int):
     out2 = out2.transpose(0, 1)
     print(ssm_states1[-1])
 
-    # np.testing.assert_allclose(ssm_states.to(torch.float32).cpu(), ssm_states1.to(torch.float32).cpu(), rtol=1e-2, atol=1)
-    # np.testing.assert_allclose(out_z.to(torch.float32).cpu(), out2.to(torch.float32).cpu(), rtol=1e-2, atol=1)
+    if verify_result:
+        np.testing.assert_allclose(ssm_states.to(torch.float32).cpu(), ssm_states1.to(torch.float32).cpu(), rtol=1e-2, atol=1)
+        np.testing.assert_allclose(out_z.to(torch.float32).cpu(), out2.to(torch.float32).cpu(), rtol=1e-2, atol=1)
 
     def fn1():
         return fn(u, ssm_states, delta, A, B, C, D, z, delta_bias, query_start_loc, cache_indices, out_z=z, has_initial_state=has_initial_state)
@@ -1260,7 +1261,7 @@ def test2(batch_size: int, seqlen: int):
     memory_total = total_length * d * 4 * torch.float16.itemsize + total_length * n * 2 * torch.float16.itemsize + d * n * torch.float32.itemsize + d * 2 * torch.float32.itemsize
     print(f"selective scan time (vLLM): {vllm_time} ms, memory bandwidth: {memory_total / vllm_time / 1e6} GB/s")
 
-    return vllm_time, 0, hexcute_time
+    return vllm_time, hexcute_time
     from tensorrt_llm.functional import selective_scan as selective_scan_trtllm
     
     BC = torch.concat([B, C], dim=-1)
@@ -1312,14 +1313,88 @@ if __name__ == "__main__":
     records = []
     headers = ["batch_sizexseqlen", "CUDA", "hexcute"]
     records = []
+    cuda = []
+    hexc = []
 
     for batch_size in [1, 4, 8, 32, 64]:
         for seqlen in [1024, 2048, 4096, 10000]:
-            vllm_time, trtllm_time, hexcute_time = test2(batch_size, seqlen)
+            vllm_time, hexcute_time = test2(batch_size, seqlen, verify_result=False)
             shape = f"{batch_size}x{seqlen}"
             records.append([shape, vllm_time, hexcute_time])
+            cuda.append(vllm_time)
+            hexc.append(hexcute_time)
             
     with open(args.output, "w") as f:
         f.write(
             tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
         )
+   
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Data (latency in ms)
+    labels = [
+        "1x1024","1x2048","1x4096","1x10000",
+        "4x1024","4x2048","4x4096","4x10000",
+        "8x1024","8x2048","8x4096","8x10000",
+        "32x1024","32x2048","32x4096","32x10000",
+        "64x1024","64x2048","64x4096","64x10000"
+    ]
+
+    #cuda =  [0.815,1.627,3.136,8.18, 5.765,6.32,12.461,32.762,
+    #         11.488,12.633,26.123,69.215, 48.267,53.607,105.687,290.028,
+    #         98.094,108.467,232.368,571.305]
+    #hexc =  [0.632,1.246,2.475,6.014, 0.867,1.705,3.382,8.244,
+    #         1.473,2.896,5.732,13.95, 5.124,10.115,20.107,48.881,
+    #         9.816,19.387,38.503,93.708]
+
+    # Fig. 11 color palette
+    methods = ['Hexcute', 'FlashAttention', 'FlashInfer', 'Triton', 'CUTLASS', 'cuBLAS']
+    clist   = ['#b5739d', '#7ea6e0', '#67ab9f', '#ea6b66', '#ffb570', '#97d077']
+    color_map = dict(zip(methods, clist))
+    color_cuda = color_map['FlashAttention']    # map CUDA(Mamba) to cuBLAS color
+    color_hexc = color_map['Hexcute']
+
+    x = np.arange(len(labels))
+    width = 0.4   # narrower bars for smaller figsize
+    gap   = 0.04
+    offset = (width + gap) / 2
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    # Bars symmetric around ticks
+    bars_cuda = ax.bar(x - offset, cuda, width, label='Mamba Library', color=color_cuda)
+    bars_hexc = ax.bar(x + offset, hexc, width, label='Hexcute',     color=color_hexc)
+
+    ymax = max(hexc) + 10
+    # Axes & grid
+    ax.set_title('Selective Scan', fontsize=18)
+    ax.set_ylabel('Latency (ms)', fontsize=18)
+    ax.set_xlabel('Batch Size x Seq Len', fontsize=12)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=40, ha='right', fontsize=12)
+    ax.set_yticks(np.arange(0, ymax, 10))
+    ax.set_yticklabels(ax.get_yticklabels(), fontsize=14)
+    ax.tick_params(axis='y', labelsize=18)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+
+    # Limit y-axis and annotate CUDA values that exceed ymax
+    ax.set_ylim(0, ymax)
+
+    for rect, val in zip(bars_cuda, cuda):
+        if val > ymax:
+            # place the text just below the top edge
+            ax.text(rect.get_x() + rect.get_width()/2., ymax - 5, f'{val:.1f}',
+                    ha='center', va='top', fontsize=14, rotation=90, color='black')
+    
+    ax.legend(loc='upper left', fontsize=16)
+    fig.tight_layout()
+    fig.subplots_adjust(
+                top=0.909,
+                bottom=0.257,
+                left=0.102,
+                right=0.992,
+                hspace=0.2,
+                wspace=0.2
+            )
+    plt.savefig(args.output.replace('.txt', '.pdf'), dpi=300, bbox_inches='tight')

@@ -142,7 +142,8 @@ class MoEConfig(Config):
                 tiled_mma: TiledMma,
                 block_k: int,
                 stages: int,
-                parallel_k_slices: int = 1):
+                parallel_k_slices: int = 1,
+                is_hopper: bool = False):
         """Initialize the MoE configuration.
 
         Args:
@@ -169,6 +170,7 @@ class MoEConfig(Config):
         self.parallel_k_slices = parallel_k_slices
         self.k_tile = k_tile
         self._stages = stages
+        self._is_hopper = is_hopper
 
     def __str__(self):
         """Generate a string representation of the configuration.
@@ -252,6 +254,15 @@ class MoEConfig(Config):
         _, c_v = canonicalize_thread_value_layout(c_tv_layout)
         return c_v.size()
 
+    @property
+    def is_hopper(self):
+        """Get whether the configuration is for Hopper architecture.
+
+        Returns:
+            True if the configuration is for Hopper architecture, False otherwise.
+        """
+        return self._is_hopper
+    
     # This is not used in our current kernel but kept here for performance model.
     def scale_elements(self, group_size: int = 64):
         """Calculate the number of scale elements per thread.
@@ -515,13 +526,13 @@ def register_configs_hopper():
         wg_in_threadblock = Level("warp_group", "thread_block", (1, 1),
                                 TensorLayout((1, 1)), (1, 1))
         tiled_mma = TiledMma(mma_atom, [wg_in_threadblock])
-        _predefined_hopper_config.append(MoEConfig(tiled_mma, bk, 4, 1))
+        _predefined_hopper_config.append(MoEConfig(tiled_mma, bk, 4, 1, is_hopper=True))
 
         mma_atom = MmaAtom("warp_group", (n, 64, 16), a, b, c, c, (1, 1))
         wg_in_threadblock = Level("warp_group", "thread_block", (1, 2),
                                 TensorLayout((1, 2)), (1, 1))
         tiled_mma = TiledMma(mma_atom, [wg_in_threadblock])
-        _predefined_hopper_config.append(MoEConfig(tiled_mma, bk, 4, 1))
+        _predefined_hopper_config.append(MoEConfig(tiled_mma, bk, 4, 1, is_hopper=True))
 
 
 
@@ -908,7 +919,6 @@ class MoELinearWnA16:
             return self._moe_wna16_bad_smem_layout(config)
         major, minor = hidet.cuda.compute_capability()
         if config in _predefined_hopper_config:
-            tune.check(False)
             tune.check(major >= 9)
             return self._moe_wna16_hopper(config)
         else:
@@ -3696,6 +3706,8 @@ def compile_fused_moe(
             average_tokens_per_expert = experts_per_token * num_tokens / num_experts 
             min_num_tokens = (8 * num_experts) / experts_per_token
             if num_tokens <= min_num_tokens and bm >= 32:
+                continue
+            if num_tokens <= min_num_tokens and (cfg1.is_hopper or cfg2.is_hopper):
                 continue
             if num_tokens > min_num_tokens:
                 if average_tokens_per_expert <= 256 and (bm < 0.5 * average_tokens_per_expert or bm > 2 * average_tokens_per_expert):

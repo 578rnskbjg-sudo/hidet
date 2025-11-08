@@ -111,7 +111,7 @@ def test_fused_moe_wna16(
 
         from vllm.model_executor.layers.fused_moe import fused_topk
 
-        topk_weights, topk_ids, _ = fused_topk(hidden_state, score, experts_per_token, renormalize=renormalize)
+        topk_weights, topk_ids = fused_topk(hidden_state, score, experts_per_token, renormalize=renormalize)
 
         out_hidden_state, intermediate_cache1, intermediate_cache2, intermediate_cache3 = moe(
             hidden_state,
@@ -434,9 +434,10 @@ def generate_performance_plot(triton, hexcute, marlin_old, marlin_new):
     # Adjust layout to prevent clipping of tick-labels
     plt.savefig("moewna16_performance_plot.pdf", dpi=300, bbox_inches='tight')
 
+
 if __name__ == "__main__":
     test_fused_moe_wna16([1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 2048, 4096, 8192, 16384], 7168, 256, 8, 256, 64, u4, f16, output="fused_moe_v8.2.txt")
    
-    _, triton, marlin_old, hexcute = markdown_table_to_dicts("fused_moe_v8.2.txt")
-    _, _, marlin_new, hexcute = markdown_table_to_dicts("fused_moe.txt")
+    _, _, marlin_old, hexcute = markdown_table_to_dicts("fused_moe_v8.2.txt")
+    _, triton, marlin_new, hexcute = markdown_table_to_dicts("fused_moe.txt")
     generate_performance_plot(triton, hexcute, marlin_old, marlin_new)
