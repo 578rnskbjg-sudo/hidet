@@ -1,5 +1,5 @@
-from vllm.model_executor.layers.quantization.cserve_moe_wna16_kernel import fused_moe_wna16, preprocess_weight
-from vllm.model_executor.layers.quantization.moe_utils import cast_f16_to_u4, cast_u4_to_f16
+from moe_wna16 import fused_moe_wna16, preprocess_weight
+from moe_utils import cast_f16_to_u4, cast_u4_to_f16
 from typing import Union, List, Optional, Callable, Any
 import functools
 import itertools
@@ -73,21 +73,29 @@ def test_fused_moe_wna16(
     group_size: int,
     param_dtype: DataType,
     act_dtype: DataType,
+    cache_dir: str = "fused_moe",
+    triton_dataflow: bool = False,
+    triton_shared_memory: bool = False,
+    output: str = "fused_moe.txt",
+    verify_result: bool = True,
 ):
     with hidet.option.context():
-        hidet.option.cache_dir("fused_moe_1")
+        hidet.option.cache_dir(cache_dir)
         hidet.option.debug_cache_tuning(True)
         hidet.option.save_lower_ir(True)
         hidet.option.search_space(2)
-        hidet.option.num_local_workers(1)
+#        hidet.option.num_local_workers(1)
         hidet.option.use_torch_stream(True)
         setConsoleLevel(INFO)
 
-        moe = fused_moe_wna16(k, n, experts_per_token, num_experts, group_size, param_dtype, act_dtype)
+        moe = fused_moe_wna16(k, n, experts_per_token, num_experts, group_size, param_dtype, act_dtype, triton_dataflow, triton_shared_memory)
 
     hidet.option.use_torch_stream(True)
     import numpy as np
-    hidet.option.num_local_workers(1)
+    from tabulate import tabulate
+    records = []
+    headers = ["num_tokens", "triton", "marlin", "hexcute"]
+    
     for num_tokens in tokens:
         renormalize = False
         adtype = dtype_to_torch(act_dtype)
@@ -103,7 +111,7 @@ def test_fused_moe_wna16(
 
         from vllm.model_executor.layers.fused_moe import fused_topk
 
-        topk_weights, topk_ids = fused_topk(hidden_state, score, experts_per_token, renormalize=renormalize)
+        topk_weights, topk_ids, _ = fused_topk(hidden_state, score, experts_per_token, renormalize=renormalize)
 
         out_hidden_state, intermediate_cache1, intermediate_cache2, intermediate_cache3 = moe(
             hidden_state,
@@ -123,7 +131,7 @@ def test_fused_moe_wna16(
         print(out_hidden_state)
 
         def fn():
-            topk_weights, topk_ids = fused_topk(hidden_state, score, experts_per_token, renormalize=renormalize)
+            topk_weights, topk_ids, _ = fused_topk(hidden_state, score, experts_per_token, renormalize=renormalize)
             return moe(
                 hidden_state,
                 qweight1,
@@ -138,11 +146,11 @@ def test_fused_moe_wna16(
             )
 
         torch.cuda.profiler.cudart().cudaProfilerStart()
-        time = do_bench(fn, percentiles=None)
+        time_hexcute = do_bench(fn, percentiles=None)
         provider = "hexcute"
         print(f"k: {k}, n: {n}")
         print(f"experts_per_token: {experts_per_token}, num_experts: {num_experts}, group_size: {group_size}")
-        print(f"provider: {provider}, num_tokens: {num_tokens}, time: {time}")
+        print(f"provider: {provider}, num_tokens: {num_tokens}, time: {time_hexcute}")
 
         del qweight1
         del qweight2
@@ -204,14 +212,14 @@ def test_fused_moe_wna16(
                     block_shape=[0, group_size],
                 )
 
-            time = do_bench(fn, percentiles=None)
+            time_triton = do_bench(fn, percentiles=None)
             provider = "triton"
             print(f"k: {k}, n: {n}")
             print(f"experts_per_token: {experts_per_token}, num_experts: {num_experts}, group_size: {group_size}")
-            print(f"provider: {provider}, num_tokens: {num_tokens}, time: {time}")
+            print(f"provider: {provider}, num_tokens: {num_tokens}, time: {time_triton}")
             rtol = 1e-2 if act_dtype == f16 else 5e-2
-            np.testing.assert_allclose(triton_output.to(torch.float32).cpu(), out_hidden_state.to(torch.float32).cpu(), rtol=rtol, atol=1)
-            continue
+            if verify_result:
+                np.testing.assert_allclose(triton_output.to(torch.float32).cpu(), out_hidden_state.to(torch.float32).cpu(), rtol=rtol, atol=1)
 
             del w1_qweight
             del w2_qweight
@@ -228,7 +236,8 @@ def test_fused_moe_wna16(
                 dev = tensors[0].device
                 return torch.stack(tensors, dim=0).to(dev)
 
-            quant_type = scalar_types.uint4b8
+            #quant_type = scalar_types.uint4b8
+            quant_type = scalar_types.uint4
 
             def create_weights_for_marlin():
                 qweight1_l = []
@@ -263,10 +272,15 @@ def test_fused_moe_wna16(
                 return qweight1, scales1, zeros1, qweight2, scales2, zeros2
 
             w1_qweight, w1_scales, w1_zeros, w2_qweight, w2_scales, w2_zeros = create_weights_for_marlin()
-
+            w1_qweight.random_(0, 3)
+            w2_qweight.random_(0, 3)
+            w1_scales.random_(-2, 2)
+            w2_scales.random_(-2, 2)
+            w1_zeros.random_(0, 3)
+            w2_zeros.random_(0, 3)
            
             def fn():
-                topk_weights, topk_ids = fused_topk(hidden_state, score, topk, renormalize=renormalize)
+                topk_weights, topk_ids, _ = fused_topk(hidden_state, score, topk, renormalize=renormalize)
                 marlin_output = torch.ops.vllm.fused_marlin_moe(
                     hidden_state,
                     w1_qweight,
@@ -276,21 +290,155 @@ def test_fused_moe_wna16(
                     score,
                     topk_weights,
                     topk_ids,
+                    quant_type_id=quant_type.id,
                     w1_zeros=w1_zeros,
                     w2_zeros=w2_zeros,
-                    num_bits=4,
+                    # num_bits=4,
                 )
                 return marlin_output
 
-            time = do_bench(fn, percentiles=None)
+            time_marlin = do_bench(fn, percentiles=None)
             provider = "marlin"
             print(f"k: {k}, n: {n}")
             print(f"experts_per_token: {experts_per_token}, num_experts: {num_experts}, group_size: {group_size}")
-            print(f"provider: {provider}, num_tokens: {num_tokens}, time: {time}")
+            print(f"provider: {provider}, num_tokens: {num_tokens}, time: {time_marlin}")
+            records.append([num_tokens, time_triton, time_marlin, time_hexcute])
         except ImportError:
             logger.info("vllm not installed")
         torch.cuda.profiler.cudart().cudaProfilerStop()
+    with open(output, "w") as f:
+        f.write(
+            tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
+        )
+
+
+def markdown_table_to_dicts(markdown_file):
+    """
+    Converts a Markdown table string into a list of dictionaries.
+    Each dictionary represents a row, with keys being the column headers.
+    """
+    with open(markdown_file, "r") as f:
+        markdown_table_string = f.read()
+    lines = markdown_table_string.strip().split('\n')
+    if len(lines) < 2:
+        return []  # Not a valid table (needs at least header and separator)
+
+    # Extract headers
+    headers = [h.strip() for h in lines[0].split('|') if h.strip()]
+
+    # Skip the separator line (lines[1])
+    data_rows = lines[2:]
+    header_values = [[] for _ in headers]
+
+    for row_str in data_rows:
+        values = [v.strip() for v in row_str.split('|') if v.strip()]
+        if len(values) == len(headers):
+            for value, header_value in zip(values, header_values):
+                header_value.append(value)
+    return header_values
+
+
+def ablation_study(triton, hexcute, hexcute_w_tri_dataflow, hexcute_w_tri_smem):
+    triton = [float(x) for x in triton]
+    hexcute = [float(x) for x in hexcute]
+    hexcute_w_tri_dataflow = [float(x) for x in hexcute_w_tri_dataflow]
+    hexcute_w_tri_smem = [float(x) for x in hexcute_w_tri_smem]
+    methods = ['Hexcute', 'Marlin-old', 'Marlin-new', 'Triton', 'Ladder', 'cuBLAS']
+    
+    clist = ['#b5739d', '#7ea6e0', '#67ab9f', '#ea6b66', '#ffb570', '#97d077']
+    #clist = ['#38761D', '#4285F4', '#EA4335', '#ea6b66', '#ffb570', '#97d077']
+    my_colors = {}
+    for i, method in enumerate(methods):
+        my_colors[method] = clist[i]
+
+    import matplotlib.pyplot as plt
+    from matplotlib import rc
+    rc('font', **{'family': 'sans-serif', 'size': 25})
+    import numpy as np
+
+    # Data for each method
+    methods_ = ['Triton', 'Hexcute w/ Triton\'s dataflow', 'Hexcute w/ Triton\'s layouts', 'Hexcute']
+    methods = ['Triton', 'Marlin-old', 'Marlin-new', 'Hexcute']
+
+    ## Latency for each matrix type
+    # hexcute_w_tri_dataflow = [0.292, 0.284, 0.285, 0.314, 0.524, 0.731, 0.763, 0.959, 0.974, 0.988, 1.022, 1.182, 2.992, 5.157, 9.246, 17.824]
+    # hexcute_w_tri_smem = [0.294, 0.284, 0.279, 0.353, 0.461, 0.545, 0.663, 0.745, 0.759, 0.828, 0.84, 1.02, 2.666, 4.5, 8.073, 15.35]
+    # triton = [0.454, 1.236, 1.884, 3.019, 4.8, 6.231, 7.532, 8.504, 9.354, 9.661, 9.339, 10.688, 15.676, 27.272, 48.201, 90.759]
+    # hexcute = [0.275, 0.273, 0.285, 0.284, 0.281, 0.336, 0.385, 0.434, 0.472, 0.504, 0.514, 0.578, 1.997, 3.542, 6.462, 12.197]
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 3))
+
+    categories = [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, '2K', '4K', '8K', '16K']
+    # categories = [1, 8, 16, 32, 64, 128, 256]
+    N = len(categories)
+    ind = np.arange(N)  # X locations for the groups
+    width = 0.21         # Width of the bars
+
+    import numpy as np
+    cmap = plt.get_cmap('gnuplot')
+    ll = cmap.N*8//9
+    len_methods = len(methods)
+    indices = np.linspace(ll//5, ll, len_methods)
  
+    # Plotting the bars for each method across matrix types (speedup)
+#    print(len(speedup_marlin), len(speedup_tri), len(speedup_hi))
+    gap = 0.015
+    i = 1
+    ax.bar(ind + (i + 0.5) * (width + gap), hexcute_w_tri_dataflow, width, label=methods_[i], color=my_colors[methods[i]])
+    i = 2
+    ax.bar(ind + (i + 0.5) * (width + gap), hexcute_w_tri_smem, width, label=methods_[i], color=my_colors[methods[i]])
+    i = 0
+    ax.bar(ind + (i + 0.5) * (width + gap), triton, width, label=methods_[i], color=my_colors[methods[i]])
+    i = 3
+    ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods_[i], color=my_colors[methods[i]])
+ 
+    x = triton
+    for i in range(len(triton)):
+        if x[i] >= 20:
+            ax.text(ind[i] + (0 + 0.5) * (width + gap), 18, f'{x[i]:.0f}', ha='center', va='bottom', fontsize=10, color='black')
+
+    ax.set_ylabel('Latency (ms)', fontsize=18)
+    ax.set_ylim(0, 20)
+    ax.set_xlabel('Number of Tokens', fontsize=18)
+    ax.set_xticks(ind + (len(methods) * width) / 2)
+    ax.set_yticks(np.arange(0, 20, 2))
+    ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
+    ax.set_xticklabels(categories, fontsize=18)
+    # title_loc = -0.2
+    #ax.set_title('FP16xINT4 MoE Layer', fontsize=18)
+    ax.yaxis.grid(True, linestyle='dotted')
+
+    lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
+    lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+    x = set()
+    lins = []
+    labs = []
+    for li, la in zip(lines, labels):
+        if la in x:
+            continue
+        x.add(la)
+        lins.append(li)
+        labs.append(la)
+    fig.legend(lins, labs, loc='upper left', bbox_to_anchor=(0.09, 0.945), fontsize=13, ncols=1)
+
+    fig.subplots_adjust(
+            top=0.94,
+            bottom=0.205,
+            left=0.096,
+            right=0.99,
+            hspace=0.2,
+            wspace=0.2
+        )
+    # Adjust layout to prevent clipping of tick-labels
+    plt.savefig("ablation_study.pdf", dpi=300, bbox_inches='tight')
+
 
 if __name__ == "__main__":
-    test_fused_moe_wna16([1, 8, 16, 32, 64, 128, 256, 512], 7168, 256, 8, 128, 64, u4, bf16)
+    test_fused_moe_wna16([1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 2048, 4096, 8192, 16384], 7168, 256, 8, 256, 64, u4, f16)
+    test_fused_moe_wna16([1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 2048, 4096, 8192, 16384], 7168, 256, 8, 256, 64, u4, f16, cache_dir="fused_moe_dataflow", output="fused_moe_dataflow.txt", triton_dataflow=True, triton_shared_memory=False, verify_result=False)
+    test_fused_moe_wna16([1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, 2048, 4096, 8192, 16384], 7168, 256, 8, 256, 64, u4, f16, cache_dir="fused_moe_shared_memory", output="fused_moe_shared_memory.txt", triton_dataflow=False, triton_shared_memory=True, verify_result=False)
+    
+    _, triton, marlin, hexcute = markdown_table_to_dicts("fused_moe.txt")
+    _, _, _, hexcute_w_tri_dataflow = markdown_table_to_dicts("fused_moe_dataflow.txt")
+    _, _, _, hexcute_w_tri_smem = markdown_table_to_dicts("fused_moe_shared_memory.txt")
+    ablation_study(triton, hexcute, hexcute_w_tri_dataflow, hexcute_w_tri_smem)

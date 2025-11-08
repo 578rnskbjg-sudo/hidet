@@ -65,8 +65,6 @@ def _do_bench(fn, warmup, rep, percentiles, flush_l2_cache=False):
     estimate_ms = end_event.elapsed_time(start_event) / 5
     n_warmup = max(1, int(warmup / estimate_ms))
     n_repeat = max(1, int(rep / estimate_ms))
-    n_warmup = 5
-    n_repeat = 400
 
     start_event = [create_event() for i in range(n_repeat)]
     end_event = [create_event() for i in range(n_repeat)]

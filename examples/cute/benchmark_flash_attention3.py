@@ -36,10 +36,17 @@ from hidet.ir.cute.ops import (
 )
 from quant_utils import canonicalize, bench
 from hidet.ir.primitives.cuda import barrier_sync, barrier_arrive
-
+from hidet.ir.primitives.cuda.barrier import fence_view_async_shared
+from hidet.ir.primitives.cuda.copy_tma import (
+    copy_bulk_commit_group,
+    copy_bulk_wait_group,
+)
 from hidet.utils import initialize
 
 from hidet.ir.library import tune
+
+
+epilogue_subtiling = False
 
 
 _tiled_mma_pairs: List[Tuple[TiledMma, TiledMma]] = []
@@ -400,19 +407,36 @@ class FlashAttention3:
                     tr_qk1_sum = broadcast_to(tr_qk_sum, tr_o)
                     tr_o = tr_o / tr_qk1_sum
 
-                    tg_o = tensor_view(
-                        o[batch_idx, pid_m * bm :, head_idx, 0:],
-                        TensorLayout((bm, head_size), (num_heads * head_size, 1)),
-                        "global",
-                    )
+                    if epilogue_subtiling:
+                        tr_o_f16 = cast(tr_o, f16)
+                        ts_o = make_tensor("float16", layout_auto((bm, 32)), "shared")
+                        tcro = partition_src(tr_o_f16, auto_copy())
+                        tcsc = partition_dst(ts_o, auto_copy())
+                        tg_o = tensor_view(o, TensorLayout((batch_size * seqlen_q, num_heads * head_size), (num_heads * head_size, 1)), "global", (bm, head_size), (batch_idx * seqlen_q + pid_m * bm, head_idx * head_size))
+                        tOsO = partition_src(ts_o, auto_copy())
+                        tOgO = partition_dst(tg_o, auto_copy())
+                        epilogue_stages = head_size // 32
+                        for i in range(epilogue_stages):
+                            copy(auto_copy((bm, 32)), tcro[:, :, i], tcsc)
+                            syncthreads()
+                            fence_view_async_shared()
+                            copy(auto_copy((bm, 32)), tOsO, tOgO[:, :, i])
+                            copy_bulk_commit_group()
+                            copy_bulk_wait_group(0)
+                            syncthreads()
+                            fence_view_async_shared()
+                    else:         
+                        tr_o_f16 = cast(tr_o, f16)       
+                        tg_o = tensor_view(
+                            o[batch_idx, pid_m * bm :, head_idx, 0:],
+                            TensorLayout((bm, head_size), (num_heads * head_size, 1)),
+                            "global",
+                        )
+                        tr_O = rearrange(tr_o_f16, auto_layout, "register")
 
-                    tr_o_f16 = cast(tr_o, f16)
-
-                    tr_O = rearrange(tr_o_f16, auto_layout, "register")
-
-                    txrx_o = partition_src(tr_O, auto_copy())
-                    txgx_o = partition_dst(tg_o, auto_copy())
-                    copy(auto_copy((bm, head_size)), txrx_o, txgx_o)
+                        txrx_o = partition_src(tr_O, auto_copy())
+                        txgx_o = partition_dst(tg_o, auto_copy())
+                        copy(auto_copy((bm, head_size)), txrx_o, txgx_o)
 
         return script_module.ir_module()
 
@@ -756,19 +780,35 @@ class FlashAttention3:
                     tr_qk2_sum = broadcast_to(tr_qk_sum, tr_o)
                     tr_o = tr_o / tr_qk2_sum
 
-                    tg_o = tensor_view(
-                        o[batch_idx, pid_m * bm :, head_idx, 0:],
-                        TensorLayout((bm, head_size), (num_heads * head_size, 1)),
-                        "global",
-                    )
-
                     tr_o_f16 = cast(tr_o, f16)
-
-                    tr_O = rearrange(tr_o_f16, auto_layout, "register")
-
-                    txrx_o = partition_src(tr_O, auto_copy())
-                    txgx_o = partition_dst(tg_o, auto_copy())
-                    copy(auto_copy((bm, head_size)), txrx_o, txgx_o)
+                    if epilogue_subtiling:
+                        ts_o = make_tensor("float16", layout_auto((bm, 32)), "shared")
+                        tcro = partition_src(tr_o_f16, auto_copy())
+                        tcsc = partition_dst(ts_o, auto_copy())
+                        tg_o = tensor_view(o, TensorLayout((batch_size * seqlen_q, num_heads * head_size), (num_heads * head_size, 1)), "global", (bm, head_size), (batch_idx * seqlen_q + pid_m * bm, head_idx * head_size))
+                        tOsO = partition_src(ts_o, auto_copy())
+                        tOgO = partition_dst(tg_o, auto_copy())
+                        epilogue_stages = head_size // 32
+                        for i in range(epilogue_stages):
+                            copy(auto_copy((bm, 32)), tcro[:, :, i], tcsc)
+                            syncthreads()
+                            fence_view_async_shared()
+                            copy(auto_copy((bm, 32)), tOsO, tOgO[:, :, i])
+                            copy_bulk_commit_group()
+                            copy_bulk_wait_group(0)
+                            syncthreads()
+                            fence_view_async_shared()
+                    else:
+                        tg_o = tensor_view(
+                            o[batch_idx, pid_m * bm :, head_idx, 0:],
+                            TensorLayout((bm, head_size), (num_heads * head_size, 1)),
+                            "global",
+                        )
+                        tr_O = rearrange(tr_o_f16, auto_layout, "register")
+    
+                        txrx_o = partition_src(tr_O, auto_copy())
+                        txgx_o = partition_dst(tg_o, auto_copy())
+                        copy(auto_copy((bm, head_size)), txrx_o, txgx_o)
 
         return script_module.ir_module()
 
@@ -947,7 +987,7 @@ def main(
 
     def fn():
         func(q, k, v, o)
-    mean, min_lat, max_lat = bench(func, (q, k, v, o))
+    mean, min_lat, max_lat = bench(fn, ())
     mean_hexcute = mean
     flops = 2.0 * (
         batch_size * seqlen_q * num_heads * seqlen_k * head_size
@@ -1027,7 +1067,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", "-d", action="store_true", help="whether enabling debug mode or not")
     parser.add_argument("--output", "-o", type=str, default=None, help="output txt")
 
-#    hidet.option.num_local_workers(1)
+    #hidet.option.num_local_workers(1)
     args = parser.parse_args()
     if args.cache_dir is not None:
         hidet.option.cache_dir(args.cache_dir)

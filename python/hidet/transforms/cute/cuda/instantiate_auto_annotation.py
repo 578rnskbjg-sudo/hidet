@@ -3341,7 +3341,7 @@ class ResolveAuto(IRVisitor):
         mask = e.mask
         # Step 1. Try to schedule the copy operation using TMA
         tmaldg = mask is None and mbarrier is not None
-        tmastg = mask is None and mbarrier is None
+        tmastg = is_dst_gmem and mask is None and mbarrier is None
         if shared_tensor is not None and (tmaldg or tmastg):
             sche = self._schedule_tma_copy(
                 dtype,

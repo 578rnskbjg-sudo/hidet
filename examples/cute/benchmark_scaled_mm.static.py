@@ -41,9 +41,17 @@ from hidet.ir.cute.ops import (
 from hidet.utils.benchmark import do_bench
 from hidet.utils import initialize
 from hidet.ir.library import tune
+from hidet.ir.primitives.cuda.copy_tma import (
+    copy_bulk_commit_group,
+    copy_bulk_wait_group,
+)
+from hidet.ir.primitives.cuda.barrier import fence_view_async_shared
 
 
 _tiled_mma_lists: List[TiledMma] = []
+
+
+epilogue_subtiling = True
 
 
 @initialize()
@@ -159,6 +167,7 @@ class W8A8ScaledMM:
             log_swizzle_size = 0
         cluster_blk_major = cdiv(n, cluster_n * bn)
         tune.check(num_sms % cluster_size == 0)
+        tune.check(cluster_m == 1 or cluster_n == 1)
         unroll = f"u{k_pipe_max}"
 
         with hidet.script_module() as script_module:
@@ -332,17 +341,36 @@ class W8A8ScaledMM:
                             smem_pipe_release = 0
                             release_phase = not release_phase
 
-                    tr_C = rearrange(cast(tr_c_final, bf16), auto_layout, "register")
-
-                    tg_c = tensor_view(
-                        c[bid_x * bm : (bid_x + 1) * bm, bid_y * bn : (bid_y + 1) * bn],
-                        TensorLayout((bm, bn), (n, 1)),
-                        "global",
-                    )
-                    txgc = partition_src(tg_c, auto_copy())
-                    txrc = partition_dst(tr_C, auto_copy())
-                    mask_c = mask(auto_copy(()), [m - bid_x * bm, n - bid_y * bn])
-                    copy(auto_copy((bm, bn)), txrc, txgc, mask_c)
+                    if epilogue_subtiling:
+                        # Convert result to FP16 and prepare for global memory write
+                        ts_c = make_tensor("bfloat16", layout_auto((bm, 64)), "shared")
+                        tcrc = partition_src(cast(tr_c_final, bf16), auto_copy())
+                        tcsc = partition_dst(ts_c, auto_copy())
+                        tg_c = tensor_view(c, TensorLayout((m, n), (n, 1)), "global", (bm, bn), (bid_x * bm, bid_y * bn))
+                        tCsC = partition_src(ts_c, auto_copy())
+                        tCgC = partition_dst(tg_c, auto_copy())
+                        epilogue_stages = bn // 64
+                        for i in range(epilogue_stages):
+                            copy(auto_copy((bm, 64)), tcrc[:, :, i], tcsc)
+                            syncthreads()
+                            fence_view_async_shared()
+                            copy(auto_copy((bm, 64)), tCsC, tCgC[:, :, i])
+                            copy_bulk_commit_group()
+                            copy_bulk_wait_group(0)
+                            syncthreads()
+                            fence_view_async_shared()
+                    else:
+                        tr_C = rearrange(cast(tr_c_final, bf16), auto_layout, "register")
+    
+                        tg_c = tensor_view(
+                            c[bid_x * bm : (bid_x + 1) * bm, bid_y * bn : (bid_y + 1) * bn],
+                            TensorLayout((bm, bn), (n, 1)),
+                            "global",
+                        )
+                        txgc = partition_src(tg_c, auto_copy())
+                        txrc = partition_dst(tr_C, auto_copy())
+                        mask_c = mask(auto_copy(()), [m - bid_x * bm, n - bid_y * bn])
+                        copy(auto_copy((bm, bn)), txrc, txgc, mask_c)
 
         return script_module.ir_module()
 
@@ -437,7 +465,7 @@ def main(m, n, k, group_m, group_n, group_k, cand=None):
     def fn():
         func(a, b, c, scale_a, scale_b)
 
-    mean = do_bench(fn, percentiles=None)
+    mean = best_time
     flops = 2.0 * m * n * k
     memory = f8e4m3.nbytes * (m * k + k * n) + f16.nbytes * m * n
     print("Hexcute: time={:.3f} ms, performance={:.3f} TFLOPS".format(mean, flops / (1e9 * mean)))
@@ -527,7 +555,7 @@ if __name__ == "__main__":
     if args.debug:
         hidet.option.debug_cache_tuning()
         hidet.option.save_lower_ir(True)
-    hidet.option.num_local_workers(1)
+    #hidet.option.num_local_workers(1)
 
     m, n, k, group_m, group_n, group_k = (args.m, args.n, args.k, args.group_m, args.group_n, args.group_k)
     if args.arch is not None:
@@ -579,11 +607,6 @@ if __name__ == "__main__":
 
     # Data for each method
     methods = ['Triton', 'CUTLASS', 'Hexcute']
-
-    # Latency for each matrix type
-    triton = [  9.78,  24.40,  11.93,  19.57,  10.10,  17.32,  10.22, 19.17,   48.80,  23.86, 38.74, 19.99,  35.35, 20.64, 38.74,  92.92, 44.28,  73.69,  40.41, 73.10, 40.90,   150.70, 214.45,   188.79,  185.30,  213.22,  174.19,  195.78,  178.43,  221.04,  193.03,  201.10, 218.256, 196.27, 217.81]
-    cutlass = [14.91,  43.92,  20.65,  29.82,  18.07,  50.53,  19.88, 29.83,   89.48,  41.29, 60.61, 36.14, 101.06, 36.40, 60.61, 178.96, 82.60, 119.30, 72.27, 202.12, 79.536, 522.865, 687.194, 467.479, 643.096, 683.290, 643.742, 624.722, 639.675, 693.357, 475.567, 675.612, 699.180, 616.318, 690.648]
-    hexcute = [18.42, 56.184, 26.189, 38.348, 24.090, 68.174, 24.970, 38.34, 102.805, 52.377, 75.16, 46.98, 122.71, 47.72, 79.96, 197.22, 89.48, 156.59, 96.36, 241.97, 95.44,  583.781, 566.37,  234.53,  683.29,  583.781, 656.581, 613.566, 653.581, 578.014, 240.277, 699.180, 598.303, 695.893, 657.602]
 
     fig, ax = plt.subplots(1, 1, figsize=(30, 4))
     
