@@ -376,6 +376,12 @@ def register_hidet_options():
         "'enable', 'disable', and 'auto'",
     )
     register_option(
+        name='hexcute_candidate',
+        type_hint='int',
+        default_value=-1,
+        description="",
+    )
+    register_option(
         name='internal.dispatch_table.enabled_idt',
         type_hint='bool',
         default_value=True,
@@ -1119,6 +1125,14 @@ def get_hexcute_matmul() -> str:
         Get strategy to enable the hexcute matmul kernels.
     """
     return OptionContext.current().get_option('hexcute_matmul')
+
+
+def hexcute_candidate(index: int):
+    OptionContext.current().set_option('hexcute_candidate', index)
+
+
+def get_hexcute_candidate() -> int:
+    return OptionContext.current().get_option('hexcute_candidate')
 
 
 def debug_show_verbose_flow_graph(enable: bool = True):

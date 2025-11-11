@@ -372,7 +372,7 @@ class MatmulF16CuteTask(Task):
         block_k=[32, 64],
         multi_stage=[True, False],
         parallel_k_parts=get_parallel_k_candidates,
-        use_cublas=[True, False],
+        use_cublas=[False],
     )
     @tune.space(
         1,
@@ -549,11 +549,11 @@ class MatmulF16CuteTask(Task):
                 k_blocks = cdiv(k_extent, block_k)
 
                 # manually annotate the tensor layout to save compile time
-                ts_a = make_tensor(target_float_type, TensorLayout((block_m, block_k), (block_k, 1)), "shared")
+                ts_a = make_tensor(target_float_type, layout_auto((block_m, block_k)), "shared")
                 if transpose_b:
-                    ts_b = make_tensor(target_float_type, TensorLayout((block_n, block_k), (block_k, 1)), "shared")
+                    ts_b = make_tensor(target_float_type, layout_auto((block_n, block_k)), "shared")
                 else:
-                    ts_b = make_tensor(target_float_type, TensorLayout((block_n, block_k), (1, block_n)), "shared")
+                    ts_b = make_tensor(target_float_type, layout_auto((block_n, block_k)), "shared")
 
                 tr_a = make_tensor(target_float_type, layout_auto((block_m, inst_k * 2)), "register")
                 tr_b = make_tensor(target_float_type, layout_auto((block_n, inst_k * 2)), "register")
@@ -791,19 +791,19 @@ class MatmulF16CuteTask(Task):
                 # manually annotate the tensor layout to save compile time
                 ts_a = make_tensor(
                     target_float_type,
-                    TensorLayout((block_m, block_k, stages), (block_k, 1, block_m * block_k)),
+                    layout_auto((block_m, block_k, stages)),
                     "shared",
                 )
                 if transpose_b:
                     ts_b = make_tensor(
                         target_float_type,
-                        TensorLayout((block_n, block_k, stages), (block_k, 1, block_n * block_k)),
+                        layout_auto((block_n, block_k, stages)),
                         "shared",
                     )
                 else:
                     ts_b = make_tensor(
                         target_float_type,
-                        TensorLayout((block_n, block_k, stages), (1, block_n, block_n * block_k)),
+                        layout_auto((block_n, block_k, stages)),
                         "shared",
                     )
 

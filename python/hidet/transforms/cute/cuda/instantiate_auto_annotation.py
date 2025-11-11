@@ -1962,7 +1962,7 @@ def validate_alignment(value: TensorLayout, memory: TensorLayout, elements_per_i
 
 
 # currently, hard-coded number, may be designed as a configurable argument
-early_stop_candidates = 4
+early_stop_candidates = 5
 
 
 @register_infer_rules(Mma)
@@ -2901,6 +2901,11 @@ class ResolveAuto(IRVisitor):
                 if v not in state.var2logical_encoding:
                     ev = self.op2vars[op][j]
                     state.var2logical_encoding[v] = state.var2logical_encoding[ev]
+                else:
+                    ev = self.op2vars[op][j]
+                    xx = state.var2logical_encoding[v]
+                    yy = state.var2logical_encoding[ev]
+                    assert xx.layout == yy.layout
 
     def _update_state(self, infer_result_: InferResult, constraint_: Constraint, state: StackFrame):
         output = constraint_.output
@@ -2944,12 +2949,15 @@ class ResolveAuto(IRVisitor):
                     self._resolve(_op, state)
                 else:
                     state.finalize.append(_op)
-        state.constraints.remove(constraint_)
+        else:
+            state.constraints.remove(constraint_)
 
     def _resolve_ready(self):
         for c in self.ready:
             current_state = self._current_state()
             args = []
+            if c.op in current_state.solution:
+                continue
             for i in c.inputs:
                 assert i in current_state.var2logical_encoding
                 args.append(current_state.var2logical_encoding[i])
@@ -3770,17 +3778,22 @@ class InstantiateAutoAnnotationPass(FunctionPass):
         from .instruction_selection import instruction_selection_pass
         from .resolve_bank_conflict import resolve_bank_conflict_pass
 
+        import hidet
+        candidate_index = hidet.option.get_hexcute_candidate()
         model = LatencyModel()
         func2lat: Dict[Function, float] = {}
         idx = 0
         for _, fn in str2func.items():
             transforms = [instruction_selection_pass(), resolve_bank_conflict_pass()]
+            if idx == candidate_index:
+                return fn
             f = None
             for ps in transforms:
                 if f is None:
                     f = ps.process_func(fn)
                 else:
                     f = ps.process_func(f)
+            idx += 1
             lat = model.predict(f)
             func2lat[fn] = lat
         funcs = sorted(func2lat.keys(), key=lambda x: func2lat[x])

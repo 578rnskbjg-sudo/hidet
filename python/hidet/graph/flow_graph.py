@@ -315,6 +315,9 @@ class FlowGraph:
         GraphForwardContext._after_graph(self, inputs, outputs)
         return outputs
 
+    def get_compiled_task(self, index: int):
+        return self.nodes[index].compiled_task
+
     def dummy_inputs(self) -> List[Tensor]:
         inputs = []
         for symbolic_input in self.inputs:
