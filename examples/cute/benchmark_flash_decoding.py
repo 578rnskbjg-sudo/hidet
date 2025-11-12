@@ -1695,7 +1695,7 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
             )
             func(q, k, v, o, lock, li, mi, oi)
 
-        mean = do_bench(fn, percentiles=None)
+        mean = do_bench(fn, percentiles=None, flush_l2_cache=True)
         flops = 2.0 * (
             batch_size * seqlen_q * num_heads * seqlen_k * head_size
             + batch_size * seqlen_q * num_heads_k * seqlen_k * head_size
@@ -1769,7 +1769,7 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     def fn():
         flash_attn_func(q, k, v, causal=False)
 
-    mean = do_bench(fn, percentiles=None)
+    mean = do_bench(fn, percentiles=None, flush_l2_cache=True)
     mean_flash_atten = mean
     flops = 2.0 * (
         batch_size * seqlen_q * num_heads * seqlen_k * head_size
@@ -1796,7 +1796,7 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     def fn():
         return flashinfer.single_decode_with_kv_cache(q, k, v) # decode attention without RoPE on-the-fly
 
-    mean = do_bench(fn, percentiles=None)
+    mean = do_bench(fn, percentiles=None, flush_l2_cache=True)
     mean_flash_infer = mean
     print("time={:.3f} ms, performance={:.3f} TFLOPS".format(mean, flops / (1e9 * mean)))
     print("time={:.3f} ms, bandwidth={:.3f} GB/s".format(mean, memory / (1e6 * mean)))
@@ -1825,7 +1825,7 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
         #return out
     out3 = fn3()
     #mean, _, _ = bench(fn3, ())
-    mean = do_bench(fn3, percentiles=None)
+    mean = do_bench(fn3, percentiles=None, flush_l2_cache=True)
     mean_triton = mean
     print("triton: time={:.3f} ms, performance={:.3f} TFLOPS".format(mean, flops / (1e9 * mean)))
     print("triton: time={:.3f} ms, bandwidth={:.3f} GB/s".format(mean, memory / (1e6 * mean)))
@@ -1892,8 +1892,11 @@ if __name__ == "__main__":
     from tabulate import tabulate
 
     records = []
-    headers = ["batch_size", "num_heads", "num_heads_k", "head_size", "seqlen_q", "seqlen_k", "hexcute", "flash-atten", "flashinfer", "triton"]
+    headers = ["batch_size", "num_heads", "num_heads_k", "head_size", "seqlen_q", "seqlen_k", "hexcute", "flash-atten", "flashinfer", "triton", "bandwidth_hexcute", "bandwidth_flash_atten", "bandwidth_flash_infer", "bandwidth_triton"]
     records = []
+    hexcute = []
+    flashinfer = []
+    triton = []
 
     for batch_size in [1]:
         for num_heads in [32, 16]:
@@ -1901,10 +1904,142 @@ if __name__ == "__main__":
                 for seqlen_k in [1024, 2048, 4096, 16384, 32768, 65536]:
                     num_heads_k = num_heads
                     seqlen_q = 1
+                    from hidet.ir.dtypes import f16
+                    memory = f16.nbytes * (
+                        batch_size * num_heads * seqlen_q * head_size
+                        + batch_size * num_heads_k * seqlen_k * head_size
+                        + batch_size * num_heads_k * seqlen_k * head_size
+                        + batch_size * seqlen_q * num_heads * head_size
+                    )
+    
                     mean_hexcute, mean_flash_atten, mean_flash_infer, mean_triton = main(batch_size, num_heads, num_heads_k, head_size, seqlen_q, seqlen_k, sm_ver)
-                    records.append([batch_size, num_heads, num_heads_k, head_size, seqlen_q, seqlen_k, mean_hexcute, mean_flash_atten, mean_flash_infer, mean_triton])
+                    bandwidth_hexcute = memory / mean_hexcute / 1e6
+                    bandwidth_flash_atten = memory / mean_flash_atten / 1e6
+                    bandwidth_flash_infer = memory / mean_flash_infer / 1e6
+                    bandwidth_triton = memory / mean_triton / 1e6
+                    records.append([batch_size, num_heads, num_heads_k, head_size, seqlen_q, seqlen_k, mean_hexcute, mean_flash_atten, mean_flash_infer, mean_triton, bandwidth_hexcute, bandwidth_flash_atten, bandwidth_flash_infer, bandwidth_triton])
 
+                    hexcute.append(bandwidth_hexcute)
+                    flashinfer.append(bandwidth_flash_infer)
+                    triton.append(bandwidth_triton)
+                    
     with open(args.output, "w") as f:
         f.write(
             tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
         )
+    
+    methods = ['Hexcute', 'Marlin-old', 'Marlin-new', 'Triton', 'Ladder', 'cuBLAS']
+    methods = ['Hexcute', 'FlashAttention', 'FlashInfer', 'Triton', 'CUTLASS', 'cuBLAS']
+    
+    clist = ['#b5739d', '#7ea6e0', '#67ab9f', '#ea6b66', '#ffb570', '#97d077']
+    #clist = ['#38761D', '#4285F4', '#EA4335', '#ea6b66', '#ffb570', '#97d077']
+    my_colors = {}
+    for i, method in enumerate(methods):
+        my_colors[method] = clist[i]
+
+    import matplotlib.pyplot as plt
+    from matplotlib import rc     
+    rc('font', **{'family': 'sans-serif', 'size': 25})
+    import numpy as np
+
+    # Data for each method
+    methods = ['Triton', 'FlashInfer', 'Hexcute']
+
+
+#    comparison = hidet
+#    speedup_tri = [h / t for t, h in zip(triton, comparison)]
+#    speedup_hi = [h / t for t, h in zip(hidet, comparison)]
+#    speedup_marlin = [h / t for t, h in zip(marlin, comparison)]
+#
+#    avg_tri = 1
+#    avg_hi = 1
+#    avg_marlin = 1
+#    for i in range(len(triton)):
+#        avg_tri = avg_tri * speedup_tri[i]
+#        avg_hi = avg_hi * speedup_hi[i]
+#        avg_marlin = avg_marlin * speedup_marlin[i]
+#    speedup_tri.append(avg_tri ** (1/len(triton)))
+#    speedup_hi.append(avg_hi ** (1/len(triton)))
+#    speedup_marlin.append(avg_marlin ** (1/len(triton)))
+#
+#    speedup_hi = hidet
+#    speedup_tri = triton
+#    speedup_marlin = marlin
+#
+    fig, ax = plt.subplots(1, 1, figsize=(30, 4))
+
+    print(len(triton))
+    print(len(flashinfer))
+    print(len(hexcute))
+    categories = [f"M{m}" for m in range(len(flashinfer))]
+#    categories = [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, '2K', '4K', '8K', '16K']
+    # categories = [1, 8, 16, 32, 64, 128, 256]
+    N = len(categories)
+    ind = np.arange(N)  # X locations for the groups
+    width = 0.2         # Width of the bars
+
+    import numpy as np
+    cmap = plt.get_cmap('gnuplot')
+    ll = cmap.N*8//9
+    len_methods = len(methods)
+    indices = np.linspace(ll//5, ll, len_methods)
+    #my_colors = [cmap(int(i)) for i in indices]
+ 
+    # Plotting the bars for each method across matrix types (speedup)
+#    print(len(speedup_marlin), len(speedup_tri), len(speedup_hi))
+    gap = 0.012
+    i = 0
+    ax.bar(ind + (i + 0.5) * (width + gap), triton, width, label=methods[i], color=my_colors[methods[i]])
+    i = 1
+    ax.bar(ind + (i + 0.5) * (width + gap), flashinfer, width, label=methods[i], color=my_colors[methods[i]])
+    i = 2
+    ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods[i], color=my_colors[methods[i]])
+ 
+    #v = ind[-1] + 2.5 * (width + 0.2) * 0.6
+    #ax.text(v, speedup_hi[-1], f'{1 / speedup_tri[-1]:.2f}x', ha='center', va='bottom', fontsize=16)
+    #ax.axhline(y=1, color='b', linestyle='--', linewidth=2)
+
+ #   x = marlin_old
+ #   for i in range(len(marlin_old)):
+ #       if x[i] >= 14:
+ #           ax.text(ind[i] + 0.5 * (width + gap), 14, f'{marlin_old[i]:.0f}', ha='center', va='bottom', fontsize=10, color='black')
+
+ #   x = triton
+ #   for i in range(len(marlin_old)):
+ #       if x[i] >= 14:
+ #           ax.text(ind[i] + (1 + 0.5) * (width + gap), 13, f'{x[i]:.0f}', ha='center', va='bottom', fontsize=10, color='black')
+
+    ax.set_ylabel('Bandwidth (GB/s)', fontsize=18)
+    ax.set_ylim(0, 2000)
+    ax.set_xlabel('Fused Multi-head Attention Decoding Layers', fontsize=18)
+    ax.set_xticks(ind + (len(methods) * width) / 2)
+    ax.set_yticks(np.arange(0, 2000, 200))
+    ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
+    ax.set_xticklabels(categories, fontsize=18)
+    # title_loc = -0.2
+    #ax.set_title('FP16xINT4 MoE Layer', fontsize=18)
+    ax.yaxis.grid(True, linestyle='dotted')
+
+    lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
+    lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
+    x = set()
+    lins = []
+    labs = []
+    for li, la in zip(lines, labels):
+        if la in x:
+            continue
+        x.add(la)
+        lins.append(li)
+        labs.append(la)
+    fig.legend(lins, labs, loc='upper left', bbox_to_anchor=(0.063, 0.95), fontsize=14, ncols=3)
+
+    fig.subplots_adjust(
+            top=0.94,
+            bottom=0.173,
+            left=0.063,
+            right=0.99,
+            hspace=0.2,
+            wspace=0.2
+        )
+    # Adjust layout to prevent clipping of tick-labels
+    plt.savefig(args.output.replace('.txt', '.pdf'), dpi=300, bbox_inches='tight')

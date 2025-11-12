@@ -346,7 +346,14 @@ matmul_tests = []
 
 @initialize()
 def initialize_tests():
-    for M in [32, 64, 128, 2048, 4096]:
+    # hidet.option.cache_dir("./matmul_standalone")
+    # hidet.option.debug_cache_tuning()
+    # hidet.option.save_lower_ir(True)
+
+    matmul_tests.append((4096, 4096, 4096, 1))
+    return
+
+    for M in [2048, 4096]: #[32, 64, 128, 2048, 4096]:
         for [N, K] in [[6144, 4096], [4096, 14336], [14336, 4096], [4096, 4096], [10240, 8192], [8192, 28672], [8192, 8192], [28672, 8192]]:
             matmul_tests.append((M, N, K, 1))
     return
@@ -405,7 +412,7 @@ def data(M, N, K, L, dtype="bfloat16", device="cuda"):
     return a, b
 
 
-def test_problem(M, N, K, L, dtype):
+def test_problem(M, N, K, L, dtype, cand: int):
     def graph(a, b):
         c = a @ b
         return c
@@ -415,17 +422,28 @@ def test_problem(M, N, K, L, dtype):
     import torch._dynamo as dynamo
 
     dynamo.reset()
-    torch_mean, torch_min, torch_max = bench(graph, graph_args)
-    print(f"baseline(torch.compile mode=max-autotune): {torch_mean} ms")
+    options = {"triton.cudagraphs": False, "epilogue_fusion": True, "max_autotune": True}
+    D = graph(*graph_args)
+    #graph_opt = torch.compile(graph, options=options)
+    #D_opt = graph_opt(*graph_args)
+    #np.set_printoptions(threshold=3000, linewidth=200, edgeitems=100)
+    #np.testing.assert_allclose(
+    #    actual=D_opt.to(torch.float32).cpu().numpy(), desired=D.to(torch.float32).cpu().numpy(), rtol=1e-2
+    #)
+
+    #torch_mean, torch_min, torch_max = bench(graph, graph_args)
+    #print(f"baseline(torch.compile mode=max-autotune): {torch_mean} ms")
 
     with hidet.option.context():
-        hidet.option.cache_dir(f"./matmul_standalone")
+        hidet.option.cache_dir(f"./matmul_standalone_cand0.{cand}")
         hidet.option.debug_cache_tuning()
         hidet.option.save_lower_ir(True)
         hidet.option.parallel_k(strategy='disabled')
         hidet.option.search_space(2)
-        hidet.option.hexcute_matmul(strategy='enable')
+        # hidet.option.hexcute_candidate(cand)
+        # hidet.option.hexcute_matmul(strategy='enable')
 
+        hidet.option.hexcute_matmul(strategy='disable')
         def matmul_graph():
             a = hidet.symbol([L, M ,K], dtype=dtype, device='cuda')
             b = hidet.symbol([L, K, N], dtype=dtype, device='cuda')
@@ -433,12 +451,14 @@ def test_problem(M, N, K, L, dtype):
             return hidet.trace_from(c, [a, b])
 
         import time
+        start_time = time.time()
  
         graph_hidet = matmul_graph()
         graph_hidet = hidet.graph.optimize(graph_hidet)
         D = graph(*graph_args)
         hidet_args = [hidet.from_torch(t) for t in graph_args]
         D_hidet = graph_hidet(*hidet_args)
+        print("--- Hidet: compilation time: %s seconds ---" % (time.time() - start_time))
         np.set_printoptions(threshold=3000, linewidth=200, edgeitems=100)
         
         matmul_task = graph_hidet.get_compiled_task(0)
@@ -456,6 +476,7 @@ def test_problem(M, N, K, L, dtype):
         )
         hidet_mean, hidet_min, hidet_max = bench(hidet_matmul, hidet_args)
         print(f"hidet(torch.compile): {hidet_mean} ms")
+    return 1, 1, 1
 
     from matmul import matmul as triton_matmul
     def triton_mm(a, b):
@@ -467,124 +488,41 @@ def test_problem(M, N, K, L, dtype):
     return torch_mean, triton_mean, hidet_mean
 
 
-def main():
+def main(cand: int):
     from tabulate import tabulate
 
     records = []
-    headers = ["problem(m,n,k,l)", "cublas", "triton", "hexcute", "flops_cublas", "flops_triton", "flops_hexcute"]
-    cublas = []
-    triton = []
-    hexcute = []
+    headers = ["problem(m,n,k,l)", "cand", "max-autotune", "triton", "hidet", "speedup"]
 
+    #import subprocess
+
+    ## Execute a system command and wait for it to finish
+    #try:
+    #    result = subprocess.run(
+    #        ["hidet", "cache", "clear", "--all"],  # Command and its arguments as a list
+    #        capture_output=True,  # Capture stdout and stderr
+    #        text=True,  # Decode output as text
+    #        check=True  # Raise an exception if the command returns a non-zero exit code
+    #    )
+    #    print("Command output:")
+    #    print(result.stdout)
+    #    if result.stderr:
+    #        print("Command errors:")
+    #        print(result.stderr)
+    #except subprocess.CalledProcessError as e:
+    #    print(f"Command failed with exit code {e.returncode}")
+    #    print(f"Error output:\n{e.stderr}")
+    #except FileNotFoundError:
+    #    print("Command not found. Please check the command name and your system's PATH.")
     for problem in matmul_tests:
-        cublas_time, triton_time, hexcute_time = test_problem(*problem, dtype='float16')
-        M, N, K, L = problem
-        flops = 2 * M * N * K
-        flops_cublas = flops / cublas_time / 1e9
-        flops_triton = flops / triton_time / 1e9
-        flops_hexcute = flops / hexcute_time / 1e9
-        records.append([problem, cublas_time, triton_time, hexcute_time, flops_cublas, flops_triton, flops_hexcute])
-        cublas.append(flops_cublas)
-        triton.append(flops_triton)
-        hexcute.append(flops_hexcute)
+        torch_time, triton_time, hidet_time = test_problem(*problem, dtype='float16', cand=cand)
+        records.append([problem, cand, torch_time, triton_time, hidet_time, (torch_time - hidet_time) / torch_time * 100.0])
 
-    with open(f"matmul_a100.txt", "w") as f:
+    with open(f"results_matmul.0.{cand}.txt", "w") as f:
         f.write(
             tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left")
         )
 
-    methods = ['Hexcute', 'Marlin-old', 'Marlin-new', 'Triton', 'Ladder', 'cuBLAS']
-    methods = ['Hexcute', 'FlashAttention', 'FlashInfer', 'Triton', 'CUTLASS', 'cuBLAS']
-    
-    clist = ['#b5739d', '#7ea6e0', '#67ab9f', '#ea6b66', '#ffb570', '#97d077']
-    #clist = ['#38761D', '#4285F4', '#EA4335', '#ea6b66', '#ffb570', '#97d077']
-    my_colors = {}
-    for i, method in enumerate(methods):
-        my_colors[method] = clist[i]
-
-    import matplotlib.pyplot as plt
-    from matplotlib import rc     
-    rc('font', **{'family': 'sans-serif', 'size': 25})
-    import numpy as np
-
-    # Data for each method
-    methods = ['Triton', 'cuBLAS', 'Hexcute']
-
-    fig, ax = plt.subplots(1, 1, figsize=(30, 4))
-
-    print(len(triton))
-    categories = [f"M{m}" for m in range(len(cublas))]
-#    categories = [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 128, '2K', '4K', '8K', '16K']
-    # categories = [1, 8, 16, 32, 64, 128, 256]
-    N = len(categories)
-    ind = np.arange(N)  # X locations for the groups
-    width = 0.2         # Width of the bars
-
-    import numpy as np
-    cmap = plt.get_cmap('gnuplot')
-    ll = cmap.N*8//9
-    len_methods = len(methods)
-    indices = np.linspace(ll//5, ll, len_methods)
-    #my_colors = [cmap(int(i)) for i in indices]
- 
-    # Plotting the bars for each method across matrix types (speedup)
-#    print(len(speedup_marlin), len(speedup_tri), len(speedup_hi))
-    gap = 0.012
-    i = 0
-    ax.bar(ind + (i + 0.5) * (width + gap), triton, width, label=methods[i], color=my_colors[methods[i]])
-    i = 1
-    ax.bar(ind + (i + 0.5) * (width + gap), cublas, width, label=methods[i], color=my_colors[methods[i]])
-    i = 2
-    ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods[i], color=my_colors[methods[i]])
- 
-    #v = ind[-1] + 2.5 * (width + 0.2) * 0.6
-    #ax.text(v, speedup_hi[-1], f'{1 / speedup_tri[-1]:.2f}x', ha='center', va='bottom', fontsize=16)
-    #ax.axhline(y=1, color='b', linestyle='--', linewidth=2)
-
- #   x = marlin_old
- #   for i in range(len(marlin_old)):
- #       if x[i] >= 14:
- #           ax.text(ind[i] + 0.5 * (width + gap), 14, f'{marlin_old[i]:.0f}', ha='center', va='bottom', fontsize=10, color='black')
-
- #   x = triton
- #   for i in range(len(marlin_old)):
- #       if x[i] >= 14:
- #           ax.text(ind[i] + (1 + 0.5) * (width + gap), 13, f'{x[i]:.0f}', ha='center', va='bottom', fontsize=10, color='black')
-
-    ax.set_ylabel('Throughput (TFLOPS)', fontsize=18)
-    ax.set_ylim(0, 250)
-    ax.set_xlabel('F16 GEMM Layers', fontsize=18)
-    ax.set_xticks(ind + (len(methods) * width) / 2)
-    ax.set_yticks(np.arange(0, 250, 25))
-    ax.set_yticklabels(ax.get_yticklabels(), fontsize=14)
-    ax.set_xticklabels(categories, fontsize=18)
-    # title_loc = -0.2
-    #ax.set_title('FP16xINT4 MoE Layer', fontsize=18)
-    ax.yaxis.grid(True, linestyle='dotted')
-
-    lines_labels = [ax.get_legend_handles_labels() for ax in fig.axes]
-    lines, labels = [sum(lol, []) for lol in zip(*lines_labels)]
-    x = set()
-    lins = []
-    labs = []
-    for li, la in zip(lines, labels):
-        if la in x:
-            continue
-        x.add(la)
-        lins.append(li)
-        labs.append(la)
-    fig.legend(lins, labs, loc='upper left', bbox_to_anchor=(0.048, 0.95), fontsize=14, ncols=3)
-
-    fig.subplots_adjust(
-            top=0.94,
-            bottom=0.173,
-            left=0.048,
-            right=0.99,
-            hspace=0.2,
-            wspace=0.2
-        )
-    # Adjust layout to prevent clipping of tick-labels
-    plt.savefig("matmul_a100.pdf", dpi=300, bbox_inches='tight')
 
 if __name__ == "__main__":
-    main()
+    main(None)

@@ -545,7 +545,7 @@ if __name__ == "__main__":
     from tabulate import tabulate
 
     records = []
-    headers = ["mxnxk", "triton", "cublas", "hexcute"]
+    headers = ["mxnxk", "triton", "cublas", "hexcute", "flops_triton", "flops_cublas", "flops_hexcute"]
     records = []
 
     triton = []
