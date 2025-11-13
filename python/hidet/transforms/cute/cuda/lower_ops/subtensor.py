@@ -17,7 +17,7 @@ from hidet.ir.tools import infer_type
 
 from hidet.ir.cute.int_tuple import has_none, product_each
 from hidet.ir.cute.ops.subtensor import SubTensor
-from hidet.ir.cute import slice_and_offset, TensorLayout, TiledTensorLayout
+from hidet.ir.cute import slice_and_offset, TensorLayout, TiledTensorLayout, ComposedTensorLayout
 from hidet.ir.cute.layout import register_tensor_layout
 
 from .registry import OpEmitter, Buffer, register_impl
@@ -47,7 +47,10 @@ class SubTensorEmitter(OpEmitter):
             dst_layout = TensorLayout(1)
         dst.buffer = self.auto_var(hint=op.name, e=src_buf)
 
-        dst.layout = dst_layout
+        if isinstance(src.layout, TensorLayout):
+            dst.layout = dst_layout
+        elif isinstance(src.layout, ComposedTensorLayout):
+            dst.layout = ComposedTensorLayout(dst_layout, dst.layout.base, dst.layout.functor)
         from hidet.ir.dtypes import i32
 
         if src_off is None and offset == 0:

@@ -24,7 +24,11 @@ from hidet.ir.cute.layout import (
     TiledTensorLayout,
     LayoutBase,
     ComposedTensorLayout,
+    group,
+    coalesce,
+    make_layout,
 )
+from hidet.ir.cute.layout import filter as cute_filter
 from hidet.ir.cute.int_tuple import size, idx2crd, flatten
 from hidet.ir.cute.contexts import tid_in_groups
 from hidet.transforms.cute.cuda.instruction_selection import TmaCopyInstruction
@@ -217,9 +221,13 @@ class CopyEmitter(OpEmitter):
         src_layout = annotations["src_layout"]
         dst_layout = annotations["dst_layout"]
         if not isinstance(src.layout, TiledTensorLayout):
-            src_layout = src.layout.compose(TensorLayout(src_layout.shape_tuple))
+            vec, rest = group(src.layout, cute_filter(src_layout[0]).size(), filter_zero=True)
+            rest = cute_filter(rest, False)
+            src_layout = make_layout(vec, rest)
         if not isinstance(dst.layout, TiledTensorLayout):
-            dst_layout = dst.layout.compose(TensorLayout(dst_layout.shape_tuple))
+            vec, rest = group(dst.layout, cute_filter(dst_layout[0]).size(), filter_zero=True)
+            rest = cute_filter(rest, False)
+            dst_layout = make_layout(vec, rest)
         attrs = op.attrs
         evict = attrs["evict"]
 

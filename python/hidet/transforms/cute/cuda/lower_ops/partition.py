@@ -10,7 +10,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Tuple, List, Union, Dict
-from hidet.ir.expr import Expr, if_then_else
+from hidet.ir.expr import Expr, if_then_else, is_constant
 from hidet.ir.type import PointerType, TensorType
 from hidet.ir.tools import infer_type, simplify
 from hidet.lang.cuda import threadIdx
@@ -64,6 +64,8 @@ def partition(
         diced_layout_only_zy = composition(swizzle_only_zy, diced_layout)
         sliced_layout_only_zy = composition(swizzle_only_zy, sliced_layout)
         swizzle_active_bits = sliced_layout_only_zy(sliced_layout_only_zy.size() - 1)
+        assert isinstance(swizzle_active_bits, int) or is_constant(swizzle_active_bits)
+        swizzle_active_bits = int(swizzle_active_bits)
         if (swizzle_active_bits & ~swizzle(swizzle_active_bits)) != 0:
             return value_layout, diced_layout(tid, base=offset)
         Z = swizzle.zzz_msk & (-swizzle.zzz_msk)

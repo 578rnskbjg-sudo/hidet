@@ -671,7 +671,7 @@ def group(layout: Union[TensorLayout, ComposedTensorLayout], size_: int, filter_
     current_idx = 1
     rest = False
     for s, d in zip(flat_shape, flat_stride):
-        if filter_zero and d == 0:
+        if filter_zero and is_constant(d) and d == 0:
             if rest:
                 rest_shape.append(s)
                 rest_stride.append(d)
