@@ -3779,6 +3779,7 @@ class InstantiateAutoAnnotationPass(FunctionPass):
         from .resolve_bank_conflict import resolve_bank_conflict_pass
 
         import hidet
+
         candidate_index = hidet.option.get_hexcute_candidate()
         model = LatencyModel()
         func2lat: Dict[Function, float] = {}

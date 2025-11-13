@@ -17,12 +17,26 @@ from hidet.ir.tools import infer_type
 from hidet.lang.cuda import threadIdx, this_cluster
 
 from hidet.ir.cute.ops import Copy, Mask, Atomic
-from hidet.ir.cute.layout import TensorLayout, composition
-from hidet.ir.cute.int_tuple import size, idx2crd
+from hidet.ir.cute.layout import (
+    TensorLayout,
+    composition,
+    common_reshape,
+    TiledTensorLayout,
+    LayoutBase,
+    ComposedTensorLayout,
+)
+from hidet.ir.cute.int_tuple import size, idx2crd, flatten
 from hidet.ir.cute.contexts import tid_in_groups
 from hidet.transforms.cute.cuda.instruction_selection import TmaCopyInstruction
 
 from .registry import OpEmitter, Buffer, register_impl
+
+
+def make_composed_layout(layout: LayoutBase, rest_layout: TensorLayout):
+    if isinstance(layout, ComposedTensorLayout):
+        return ComposedTensorLayout(rest_layout, layout.base, layout.functor)
+    else:
+        return rest_layout
 
 
 @register_impl(Mask)
@@ -202,16 +216,27 @@ class CopyEmitter(OpEmitter):
 
         src_layout = annotations["src_layout"]
         dst_layout = annotations["dst_layout"]
+        if not isinstance(src.layout, TiledTensorLayout):
+            src_layout = src.layout.compose(TensorLayout(src_layout.shape_tuple))
+        if not isinstance(dst.layout, TiledTensorLayout):
+            dst_layout = dst.layout.compose(TensorLayout(dst_layout.shape_tuple))
         attrs = op.attrs
         evict = attrs["evict"]
 
-        extents = src_layout[1].shape
+        rest_src_layout = src_layout[1]
+        rest_dst_layout = dst_layout[1]
+        rest_src_layout = TensorLayout(flatten(rest_src_layout.shape_tuple), flatten(rest_src_layout.stride_tuple))
+        rest_dst_layout = TensorLayout(flatten(rest_dst_layout.shape_tuple), flatten(rest_dst_layout.stride_tuple))
+        rest_src_layout, rest_dst_layout = common_reshape(rest_src_layout, rest_dst_layout)
+        rest_src_layout = make_composed_layout(src.layout, rest_src_layout)
+        rest_dst_layout = make_composed_layout(dst.layout, rest_dst_layout)
+        extents = rest_src_layout.shape
         if mask is not None:
             index = TensorLayout(extents)
         with self.for_grid(extents) as indices:
             src_addr, dst_addr = [var(vname, t) for vname, t in zip(var_names, operand_tys)]
-            self.declare(src_addr, src.buffer + src_layout[1](indices, base=src.offset))
-            self.declare(dst_addr, dst.buffer + dst_layout[1](indices, base=dst.offset))
+            self.declare(src_addr, src.buffer + rest_src_layout(indices, base=src.offset))
+            self.declare(dst_addr, dst.buffer + rest_dst_layout(indices, base=dst.offset))
             if mask is not None:
                 idx = var("idx")
                 mask_idx = var("mask_idx")

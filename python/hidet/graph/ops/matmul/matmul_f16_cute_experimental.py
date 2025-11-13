@@ -789,23 +789,11 @@ class MatmulF16CuteTask(Task):
                 pid_n = (pid1 % num_pid_in_group) // group_size_m
 
                 # manually annotate the tensor layout to save compile time
-                ts_a = make_tensor(
-                    target_float_type,
-                    layout_auto((block_m, block_k, stages)),
-                    "shared",
-                )
+                ts_a = make_tensor(target_float_type, layout_auto((block_m, block_k, stages)), "shared")
                 if transpose_b:
-                    ts_b = make_tensor(
-                        target_float_type,
-                        layout_auto((block_n, block_k, stages)),
-                        "shared",
-                    )
+                    ts_b = make_tensor(target_float_type, layout_auto((block_n, block_k, stages)), "shared")
                 else:
-                    ts_b = make_tensor(
-                        target_float_type,
-                        layout_auto((block_n, block_k, stages)),
-                        "shared",
-                    )
+                    ts_b = make_tensor(target_float_type, layout_auto((block_n, block_k, stages)), "shared")
 
                 tr_a = make_tensor(target_float_type, layout_auto((block_m, inst_k * 2)), "register")
                 tr_b = make_tensor(target_float_type, layout_auto((block_n, inst_k * 2)), "register")

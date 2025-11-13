@@ -1684,7 +1684,7 @@ def register_mma_instruction():
                     trans_a=trans_a,
                 )
             )
-            
+
             shape = (n, 64, 32)
             a = TensorLayout(((128,), (n, 32)), ((0,), (1, n)))
             b = TensorLayout(((128,), (64, 32)), ((0,), (1, 64)))
@@ -1707,7 +1707,6 @@ def register_mma_instruction():
                     trans_a=trans_a,
                 )
             )
-
 
 
 def get_mma_instructions():

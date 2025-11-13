@@ -38,6 +38,7 @@ from .int_tuple import (
     has_none,
     is_tuple,
     concat_tuple,
+    to_mixed_bits,
 )
 from .layout import (
     TiledTensorLayout,

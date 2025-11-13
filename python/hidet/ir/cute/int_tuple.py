@@ -485,3 +485,13 @@ def concat_tuple(a: Union[tuple, int], b: Union[tuple, int]):
             return (a,) + b
         else:
             return (a, b)
+
+
+def to_mixed_bits(shape, stride, coord):
+    if is_tuple(shape) and is_tuple(stride) and is_tuple(coord):
+        return tuple(to_mixed_bits(s, d, c) for s, d, c in zip(shape, stride, coord))
+    elif is_integer(shape) and is_integer(stride) and is_integer(coord):
+        f = (shape - 1) * stride
+        return 0 | ((coord * stride) & f)
+    else:
+        raise ValueError(f"Invalid arguments: shape:{shape}, stride:{stride}, coord:{coord}")

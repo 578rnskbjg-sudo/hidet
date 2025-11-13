@@ -375,12 +375,7 @@ def register_hidet_options():
         description="Whether to enable the hexcute matmul kernels. The valid values for this option can be"
         "'enable', 'disable', and 'auto'",
     )
-    register_option(
-        name='hexcute_candidate',
-        type_hint='int',
-        default_value=-1,
-        description="",
-    )
+    register_option(name='hexcute_candidate', type_hint='int', default_value=-1, description="")
     register_option(
         name='internal.dispatch_table.enabled_idt',
         type_hint='bool',
