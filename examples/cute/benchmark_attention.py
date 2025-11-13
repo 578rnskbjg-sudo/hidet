@@ -779,7 +779,6 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
         if stages is not None:
             print(f"stages={stages}")
 
-        mean, min_lat, max_lat = bench(func, (q, k, v, o))
         def fn():
             func(q, k, v, o)
         mean = do_bench(fn, percentiles=None)
@@ -837,7 +836,6 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     def fn():
         flash_attn_func(q, k, v, causal=False)
 
-    mean, min_lat, max_lat = bench(fn, ())
     mean = do_bench(fn, percentiles=None)
     mean_flash_atten = mean
     flops = 2.0 * (
@@ -866,7 +864,6 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     out_triton = out_triton.permute(0, 2, 1, 3)
 
     mean = do_bench(fn3, percentiles=None)
-    # mean, min_lat, max_lat = bench(fn3, ())
     mean_triton = mean
     print("triton: time={:.3f} ms, performance={:.3f} TFLOPS".format(mean, flops / (1e9 * mean)))
     print("triton: time={:.3f} ms, bandwidth={:.3f} GB/s".format(mean, memory / (1e6 * mean)))
