@@ -46,7 +46,7 @@ from hidet.utils import initialize
 from hidet.ir.library import tune
 
 
-epilogue_subtiling = False
+epilogue_subtiling = True
 
 
 _tiled_mma_pairs: List[Tuple[TiledMma, TiledMma]] = []
@@ -310,7 +310,7 @@ class FlashAttention3:
                             auto_copy((head_size, bn)),
                             txgv[:, :, no],
                             txsv[:, :, smem_pipe_write],
-                            mask_=mask_,
+                            #mask_=mask_,
                             mbarrier=mbar_tma_v[smem_pipe_write],
                         )
                         mbarrier_arrive(mbar_tma_v[smem_pipe_write], tma_copy_tx_v)
@@ -633,7 +633,7 @@ class FlashAttention3:
                             auto_copy((head_size, bn)),
                             txgv[:, :, no],
                             txsv[:, :, smem_pipe_write],
-                            mask_=mask_,
+                            #mask_=mask_,
                             mbarrier=mbar_tma_v[smem_pipe_write],
                         )
                         mbarrier_arrive(mbar_tma_v[smem_pipe_write], tma_copy_tx_v)
