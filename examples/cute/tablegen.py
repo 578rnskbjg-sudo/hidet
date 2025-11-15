@@ -1,6 +1,7 @@
 from re import I
 import numpy as np
 
+
 def markdown_table_to_dicts(markdown_file):
     """
     Converts a Markdown table string into a list of dictionaries.
@@ -36,8 +37,8 @@ def compute_geomean(triton, cuda, hexcute):
     arr_triton = np.array(triton)
     arr_cuda = np.array(cuda)
     arr_hexcute = np.array(hexcute)
-    geomean_triton = np.prod(arr_triton/arr_cuda) ** (1/nr_data)
-    geomean_hexcute = np.prod(arr_hexcute/arr_cuda) ** (1/nr_data)
+    geomean_triton = np.prod(arr_triton / arr_cuda) ** (1 / nr_data)
+    geomean_hexcute = np.prod(arr_hexcute / arr_cuda) ** (1 / nr_data)
     return geomean_triton, geomean_hexcute
 
 
@@ -49,35 +50,73 @@ def main():
     _, _, _, _, _, _, _, _, _, _, bw_hexcute, bw_flash_attn, bw_flash_infer, bw_triton = markdown_table_to_dicts("decoding_a100.txt")
     _, _, _, _, _, _, hexcute_attn, triton_attn, flashattn_attn = markdown_table_to_dicts("attn_forward.txt")
 
-    hexcute_flash3 = [1/float(x) for x in hexcute_flash3]
-    triton_flash3 = [1/float(x) for x in triton_flash3]
-    flashattn_3 = [1/float(x) for x in flashattn_3]
-    hexcute_attn = [1/float(x) for x in hexcute_attn]
-    triton_attn = [1/float(x) for x in triton_attn]
-    flashattn_attn = [1/float(x) for x in flashattn_attn]
-    
+    hexcute_flash3 = [1 / float(x) for x in hexcute_flash3]
+    triton_flash3 = [1 / float(x) for x in triton_flash3]
+    flashattn_3 = [1 / float(x) for x in flashattn_3]
+    hexcute_attn = [1 / float(x) for x in hexcute_attn]
+    triton_attn = [1 / float(x) for x in triton_attn]
+    flashattn_attn = [1 / float(x) for x in flashattn_attn]
+
     triton_ws_gemm, hexcute_ws_gemm = compute_geomean(flops_triton_ws_gemm, flops_cublas_ws_gemm, flops_hexcute_ws_gemm)
     triton_scaled_mm, hexcute_scaled_mm = compute_geomean(flops_triton_scaled_mm, flops_cutlass_scaled_mm, flops_hexcute_scaled_mm)
     triton_flash3, hexcute_flash3 = compute_geomean(triton_flash3, flashattn_3, hexcute_flash3)
     triton_gemm, hexcute_gemm = compute_geomean(flops_triton_gemm, flops_cublas_gemm, flops_hexcute_gemm)
     triton_attn, hexcute_attn = compute_geomean(triton_attn, flashattn_attn, hexcute_attn)
     triton_decoding, hexcute_decoding = compute_geomean(bw_triton, bw_flash_infer, bw_hexcute)
-    
-    from tabulate import tabulate
-    headers = ["Operator", "Evaluated Shapes", "CUDA LoC", "Triton LoC", "Hexcute LoC", "Performance Baseline", "Triton (Normalized Perf)", "Hexcute (Normalized Perf)"]   
-    records = []
-    records.append(["Blockwise Scaled FP8 GEMM", len(flops_cutlass_scaled_mm), 900, 87, 180, "CUTLASS", triton_scaled_mm, hexcute_scaled_mm])
-    records.append(["Warp Specialized FP16 GEMM", len(flops_cublas_ws_gemm), 1024, 71, 169, "cuBLAS", triton_ws_gemm, hexcute_ws_gemm])
-    records.append(["Fused MHA Forward", len(flashattn_3), 1684, 114, 212, "FlashAttention3", triton_flash3, hexcute_flash3])
-    print("NVIDIA H100 GPU") 
-    print(tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left"))
 
-    records = []
-    records.append(["FP16 GEMM", len(flops_cublas_gemm), 703, 71, 98, "cuBLAS", triton_gemm, hexcute_gemm])
-    records.append(["Fused MHA Forward", len(flashattn_attn), 577, 114, 172, "FlashAttention", triton_attn, hexcute_attn])
-    records.append(["Fused MHA Decoding", len(bw_flash_infer), 322, 224, 253, "FlashInfer", triton_decoding, hexcute_decoding])
-    print("NVIDIA A100 GPU") 
-    print(tabulate(records, headers=headers, tablefmt="github", floatfmt=".3f", numalign="right", stralign="left"))
+    table_template = r"""
+\documentclass[10pt,a4paper]{article}
+\usepackage{tabularx}
+\usepackage{multirow, makecell}
+\usepackage[bottom=0.5cm, right=0.5cm, left=0.5cm, top=1.5cm]{geometry}
+
+\begin{document}
+\begin{table*}[t!]
+{\scriptsize
+\begin{center}
+\begin{tabular}{cccccccccc}
+\hline
+ \multirow{2}{*}{\textbf{GPU}} & \multirow{2}{*}{\textbf{Operator}} & \multirowcell{2}{\textbf{Evaluated}\\\textbf{Shapes}} & \multicolumn{3}{c}{\textbf{Lines of Code}}&\multirow{2}{*}{\textbf{Performance Baseline}}&\multicolumn{2}{c}{\textbf{Normalized Performance}} \\
+ & & & \textbf{CUDA}& \textbf{Triton}& \textbf{Hexcute}& &\textbf{Triton}& \textbf{Hexcute}
+\\
+\hline
+\multirowcell{4}{NVIDIA\\ A100 GPU} & FP16 GEMM&40& 703$^\mathrm{b}$ & 71 & 98 & cuBLAS & TRITON_GEMM$\times$ & \textbf{HEXCUTE_GEMM$\times$} &  \\
+& Fused MHA$^\mathrm{a}$ Forward&20& 577 & 114 & 172 & FlashAttention2 & TRITON_ATTN$\times$ & \textbf{HEXCUTE_ATTN$\times$} \\
+& Fused MHA Decoding&24& 322 & 224 & 253 & FlashInfer & TRITON_DECODING$\times$ & \textbf{HEXCUTE_DECODING$\times$} \\
+\hline
+\multirowcell{3}{NVIDIA \\ H100 GPU} & Blockwise Scaled FP8 GEMM & 35 & 900 & 87 & 180 & CUTLASS & TRITON_SCALED_MM$\times$ & \textbf{HEXCUTE_SCALED_MM$\times$} \\
+%\hline
+& Warp Specialized FP16 GEMM & 40 & 1024$^\mathrm{b}$ & 71 & 169 & cuBLAS & TRITON_WS_GEMM$\times$ & \textbf{HEXCUTE_WS_GEMM$\times$} \\
+%\hline
+& Fused MHA Forward & 20 & 1684 & 114 & 212 & FlashAttention3 & TRITON_FLASH3$\times$ & \textbf{HEXCUTE_FLASH3$\times$} \\
+%& Mixed-type Mixture of Expert &  &  & & & Marlin & & \\
+\hline
+\multicolumn{10}{l}{$^{\mathrm{a}}$ Multi-head Attention}\\
+\multicolumn{10}{l}{$^{\mathrm{b}}$ For GEMM, speedups are reported against cuBLAS, while LoC comparisons use CUTLASS because cuBLAS is closed‑source.}
+\end{tabular}
+\vspace{-5mm}
+\label{general-operators}
+\end{center}
+}
+\end{table*}
+
+\end{document}
+"""
+    with open("Table_II.tex", "w") as f:
+        f.write(
+            table_template.replace("TRITON_GEMM", f"{triton_gemm:.2f}")
+            .replace("HEXCUTE_GEMM", f"{hexcute_gemm:.2f}")
+            .replace("TRITON_ATTN", f"{triton_attn:.2f}")
+            .replace("HEXCUTE_ATTN", f"{hexcute_attn:.2f}")
+            .replace("TRITON_DECODING", f"{triton_decoding:.2f}")
+            .replace("HEXCUTE_DECODING", f"{hexcute_decoding:.2f}")
+            .replace("TRITON_SCALED_MM", f"{triton_scaled_mm:.2f}")
+            .replace("HEXCUTE_SCALED_MM", f"{hexcute_scaled_mm:.2f}")
+            .replace("TRITON_WS_GEMM", f"{triton_ws_gemm:.2f}")
+            .replace("HEXCUTE_WS_GEMM", f"{hexcute_ws_gemm:.2f}")
+            .replace("TRITON_FLASH3", f"{triton_flash3:.2f}")
+            .replace("HEXCUTE_FLASH3", f"{hexcute_flash3:.2f}")
+        )
 
 if __name__ == "__main__":
     main()
