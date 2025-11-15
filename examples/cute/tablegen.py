@@ -94,7 +94,6 @@ def main():
 \multicolumn{10}{l}{$^{\mathrm{a}}$ Multi-head Attention}\\
 \multicolumn{10}{l}{$^{\mathrm{b}}$ For GEMM, speedups are reported against cuBLAS, while LoC comparisons use CUTLASS because cuBLAS is closed‑source.}
 \end{tabular}
-\vspace{-5mm}
 \label{general-operators}
 \end{center}
 }
