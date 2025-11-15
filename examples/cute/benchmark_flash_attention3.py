@@ -1181,12 +1181,13 @@ if __name__ == "__main__":
     ax.bar(ind + (i + 0.5) * (width + gap), flashattn, width, label=methods[i] + '3', color=my_colors[methods[i]])
     i = 2
     ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods[i], color=my_colors[methods[i]])
- 
+
+    max_y = max(max(triton), max(flashattn), max(hexcute)) + 50
     ax.set_ylabel('Throughput (TFLOPS)', fontsize=18)
-    ax.set_ylim(0, 450)
+    ax.set_ylim(0, max_y)
     ax.set_xlabel('Fused Multi-head Attention Forward Layers', fontsize=18)
     ax.set_xticks(ind + (len(methods) * width) / 2)
-    ax.set_yticks(np.arange(0, 450, 50))
+    ax.set_yticks(np.arange(0, max_y, 50))
     ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
     ax.set_xticklabels(categories, fontsize=18)
     # title_loc = -0.2
