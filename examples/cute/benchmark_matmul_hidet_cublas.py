@@ -551,11 +551,12 @@ def main():
  #       if x[i] >= 14:
  #           ax.text(ind[i] + (1 + 0.5) * (width + gap), 13, f'{x[i]:.0f}', ha='center', va='bottom', fontsize=10, color='black')
 
+    max_y = max(max(triton), max(cublas), max(hexcute)) + 25
     ax.set_ylabel('Throughput (TFLOPS)', fontsize=18)
-    ax.set_ylim(0, 250)
+    ax.set_ylim(0, max_y)
     ax.set_xlabel('F16 GEMM Layers', fontsize=18)
     ax.set_xticks(ind + (len(methods) * width) / 2)
-    ax.set_yticks(np.arange(0, 250, 25))
+    ax.set_yticks(np.arange(0, max_y, 25))
     ax.set_yticklabels(ax.get_yticklabels(), fontsize=14)
     ax.set_xticklabels(categories, fontsize=18)
     # title_loc = -0.2

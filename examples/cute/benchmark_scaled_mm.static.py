@@ -631,12 +631,13 @@ if __name__ == "__main__":
     ax.bar(ind + (i + 0.5) * (width + gap), cutlass, width, label=methods[i], color=my_colors[methods[i]])
     i = 2
     ax.bar(ind + (i + 0.5) * (width + gap), hexcute, width, label=methods[i], color=my_colors[methods[i]])
- 
+
+    max_y = max(max(triton), max(cutlass), max(hexcute)) + 75
     ax.set_ylabel('Throughput (TFLOPS)', fontsize=18)
-    ax.set_ylim(0, 750)
+    ax.set_ylim(0, max_y)
     ax.set_xlabel('FP8 Block Scaled GEMM Layers', fontsize=18)
     ax.set_xticks(ind + (len(methods) * width) / 2)
-    ax.set_yticks(np.arange(0, 750, 75))
+    ax.set_yticks(np.arange(0, max_y, 75))
     ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
     ax.set_xticklabels(categories, fontsize=18)
     # title_loc = -0.2
@@ -666,162 +667,3 @@ if __name__ == "__main__":
         )
     # Adjust layout to prevent clipping of tick-labels
     plt.savefig(args.output.replace(".txt", ".pdf"), dpi=300, bbox_inches='tight')
-
-
-def func(
-    a: f8e4m3[m, k],
-    b_ptr: ~f8e4m3,
-    c: bf16[m, n],
-    scale_a: f32[m, k // group_k],
-    scale_b: f32[n // group_k, k // group_k],
-):
-    attrs.func_kind = "cuda_kernel"
-    attrs.cuda.block_dim = num_producer_threads + num_consumer_threads  # 8 warps
-    attrs.cuda.grid_dim = grid_size, 1, 1
-    attrs.cuda.cluster_dim = cluster_size
-    attrs.cuda.min_blocks = 1
-    attrs.cuda.dynamic_smem_bytes = 0
-
-    pid = blockIdx.x
-    # Block indices for grid-level parallelism
-    cluster_id = pid % cluster_size
-    cluster_mn = cluster_id2mn(cluster_id)
-    cluster_index_m = cluster_mn // cluster_n
-    cluster_index_n = cluster_mn % cluster_n
-    grid_id = pid // cluster_size
-    offset = grid_id & ((1 << log_swizzle_size) - 1)
-    extra = grid_id >> log_swizzle_size
-    cluster_idx_minor_div_swizzle = extra // cluster_blk_major
-    cluster_idx_major = extra % cluster_blk_major
-    cluster_idx_minor = cluster_idx_minor_div_swizzle * (1 << log_swizzle_size) + offset
-    bid_x = cluster_idx_minor * cluster_m + cluster_index_m
-    bid_y = cluster_idx_major * cluster_n + cluster_index_n
-
-    mbar_tma = make_mbarriers(k_pipe_max)
-    mbar_mma = make_mbarriers(k_pipe_max)
-    tg_a = tensor_view(a, TensorLayout((m, k), (k, 1)), "global", (bm, k), (bid_x * bm, 0))
-    b = as_tensor_pointer(b_ptr, f8e4m3, [n, k])
-    tg_b = tensor_view(b, TensorLayout((n, k), (k, 1)), "global", (bn, k), (bid_y * bn, 0))
-    tg_sa = tensor_view(
-        scale_a,
-        TensorLayout((m, (bn, k // group_k)), (k // group_k, (0, 1))),
-        "global",
-        (bm, bn * k // group_k),
-        (bid_x * bm, 0),
-    )
-    tg_sb = tensor_view(
-        scale_b,
-        TensorLayout(((group_k, n // group_k), (bm, k // group_k)), ((0, k // group_k), (0, 1))),
-        "global",
-        (bn, bm * k // group_k),
-        (bid_y * bn, 0),
-    )
-
-    ts_sb = make_tensor("float32", TensorLayout((bn, bm, k_pipe_max), (0, 0, 1)), "shared")
-    ts_sa = make_tensor("float32", TensorLayout((bm, bn, k_pipe_max), (1, 0, bm)), "shared")
-    ts_b = make_tensor(f8e4m3, layout_auto((bn, bk, k_pipe_max)), "shared")
-    ts_a = make_tensor(f8e4m3, layout_auto((bm, bk, k_pipe_max)), "shared")
-
-    syncthreads()
-
-    with warp_groups_producer(producer_warpgroups, num_regs=40):
-        smem_pipe_write = 0
-        write_phase = True
-
-        txga = partition_src(tg_a, auto_copy())
-        txsa = partition_dst(ts_a, auto_copy())
-        txgb = partition_src(tg_b, auto_copy())
-        txsb = partition_dst(ts_b, auto_copy())
-        txgsa = partition_src(tg_sa, auto_copy())
-        txgsb = partition_src(tg_sb, auto_copy())
-        txssa = partition_dst(ts_sa, auto_copy())
-        txssb = partition_dst(ts_sb, auto_copy())
-
-        k_blocks = cdiv(k, bk)
-        for ko in grid(k_blocks, attrs=unroll):
-            if ko >= k_pipe_max:
-                mbarrier_wait(mbar_mma[smem_pipe_write], write_phase)
-            copy(auto_copy((bm, bk)), txga[:, :, ko], txsa[:, :, smem_pipe_write], mbarrier=mbar_tma[smem_pipe_write])
-            copy(auto_copy((bn, bk)), txgb[:, :, ko], txsb[:, :, smem_pipe_write], mbarrier=mbar_tma[smem_pipe_write])
-            copy(auto_copy((bm, bn)), txgsa[:, :, ko], txssa[:, :, smem_pipe_write], mbarrier=mbar_tma[smem_pipe_write])
-            copy(auto_copy((bn, bm)), txgsb[:, :, ko], txssb[:, :, smem_pipe_write], mbarrier=mbar_tma[smem_pipe_write])
-
-            mbarrier_arrive(mbar_tma[smem_pipe_write], tma_copy_tx)
-            smem_pipe_write += 1
-            if smem_pipe_write == k_pipe_max:
-                smem_pipe_write = 0
-                write_phase = not write_phase
-
-        for ko in range(k_pipe_max):
-            mbarrier_wait(mbar_mma[smem_pipe_write], write_phase)
-            smem_pipe_write += 1
-            if smem_pipe_write == k_pipe_max:
-                smem_pipe_write = 0
-                write_phase = not write_phase
-
-    with warp_groups_consumer(consumer_warpgroups, num_regs=232):
-        smem_pipe_read = 0
-        read_phase = False
-        smem_pipe_release = 0
-        release_phase = False
-
-        tr_c_final = make_tensor("float32", layout_auto((bm, bn)), "register")
-        tr_sa = make_tensor("float32", layout_auto((bm, bn), (1, 0)), "register")
-        tr_sb = make_tensor("float32", layout_auto((bm, bn), (0, 0)), "register")
-        ts_sbt = transpose(ts_sb, 1, 0, 2)
-
-        fill(tr_c_final, 0.0)
-
-        txSa = partition_A(ts_a, tiled_mma)
-        txSb = partition_B(ts_b, tiled_mma)
-
-        txSsa = partition_src(ts_sa, auto_copy())
-        txSsb = partition_src(ts_sbt, auto_copy())
-        txrsa = partition_dst(tr_sa, auto_copy())
-        txrsb = partition_dst(tr_sb, auto_copy())
-
-        k_blocks = cdiv(k, bk)
-        k_tiles = cdiv(bk, inst_k)
-
-        for ko in grid(k_blocks, attrs=unroll):
-            tr_c = make_tensor("float32", layout_auto((bm, bn)), "register")
-            mbarrier_wait(mbar_tma[smem_pipe_read], read_phase)
-            fill(tr_c, 0.0)
-            copy(auto_copy(), txSsa[:, :, smem_pipe_read], txrsa)
-            copy(auto_copy(), txSsb[:, :, smem_pipe_read], txrsb)
-            scale = txrsa * txrsb
-            wgmma_fence_operand(tr_c)
-            wgmma_fence()
-            for ki in range(k_tiles):
-                mma(
-                    tiled_mma,
-                    tr_c,
-                    txSa[:, :, ki, smem_pipe_read],
-                    txSb[:, :, ki, smem_pipe_read],
-                    tr_c,
-                    cluster_layout=cluster_layout,
-                )
-            wgmma_commit_group()
-            wgmma_fence_operand(tr_c)
-            wgmma_wait_group(0)
-            mbarrier_arrive(mbar_mma[smem_pipe_release])
-            tr_c_final = tr_c * scale + tr_c_final
-
-            smem_pipe_read += 1
-            if smem_pipe_read == k_pipe_max:
-                smem_pipe_read = 0
-                read_phase = not read_phase
-            smem_pipe_release += 1
-            if smem_pipe_release == k_pipe_max:
-                smem_pipe_release = 0
-                release_phase = not release_phase
-
-        tr_C = rearrange(cast(tr_c_final, bf16), auto_layout, "register")
-
-        tg_c = tensor_view(
-            c[bid_x * bm : (bid_x + 1) * bm, bid_y * bn : (bid_y + 1) * bn], TensorLayout((bm, bn), (n, 1)), "global"
-        )
-        txgc = partition_src(tg_c, auto_copy())
-        txrc = partition_dst(tr_C, auto_copy())
-        mask_c = mask(auto_copy(()), [m - bid_x * bm, n - bid_y * bn])
-        copy(auto_copy((bm, bn)), txrc, txgc, mask_c)

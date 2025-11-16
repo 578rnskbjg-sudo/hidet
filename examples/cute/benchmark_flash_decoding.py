@@ -2009,11 +2009,12 @@ if __name__ == "__main__":
  #       if x[i] >= 14:
  #           ax.text(ind[i] + (1 + 0.5) * (width + gap), 13, f'{x[i]:.0f}', ha='center', va='bottom', fontsize=10, color='black')
 
+    max_y = max(max(triton), max(flashinfer), max(hexcute)) + 200
     ax.set_ylabel('Bandwidth (GB/s)', fontsize=18)
-    ax.set_ylim(0, 2000)
+    ax.set_ylim(0, max_y)
     ax.set_xlabel('Fused Multi-head Attention Decoding Layers', fontsize=18)
     ax.set_xticks(ind + (len(methods) * width) / 2)
-    ax.set_yticks(np.arange(0, 2000, 200))
+    ax.set_yticks(np.arange(0, max_y, 200))
     ax.set_yticklabels(ax.get_yticklabels(), fontsize=18)
     ax.set_xticklabels(categories, fontsize=18)
     # title_loc = -0.2
