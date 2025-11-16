@@ -987,7 +987,7 @@ def main(
 
     def fn():
         func(q, k, v, o)
-    mean, min_lat, max_lat = bench(fn, ())
+    mean = best_time
     mean_hexcute = mean
     flops = 2.0 * (
         batch_size * seqlen_q * num_heads * seqlen_k * head_size

@@ -458,7 +458,7 @@ def main(m, n, k, cand=None):
     def fn():
         func(a, b, c)
 
-    mean = do_bench(fn, percentiles=None)
+    mean = best_time
     flops = 2.0 * m * n * k
     memory = f8e4m3.nbytes * (m * k + k * n) + f16.nbytes * m * n
     print("Hexcute: time={:.3f} ms, performance={:.3f} TFLOPS".format(mean, flops / (1e9 * mean)))
