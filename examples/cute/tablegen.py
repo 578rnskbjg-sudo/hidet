@@ -132,18 +132,18 @@ def main():
 """
     with open("Table_II.tex", "w") as f:
         f.write(
-            table_template.replace("TRITON_GEMM", f"{triton_gemm:.2f}" if triton_gemm > 0 else "")
-            .replace("HEXCUTE_GEMM", f"{hexcute_gemm:.2f}" if hexcute_gemm > 0 else "")
-            .replace("TRITON_ATTN", f"{triton_attn:.2f}" if triton_attn > 0 else "")
-            .replace("HEXCUTE_ATTN", f"{hexcute_attn:.2f}" if hexcute_attn > 0 else "")
-            .replace("TRITON_DECODING", f"{triton_decoding:.2f}" if triton_decoding > 0 else "")
-            .replace("HEXCUTE_DECODING", f"{hexcute_decoding:.2f}" if hexcute_decoding > 0 else "")
-            .replace("TRITON_SCALED_MM", f"{triton_scaled_mm:.2f}" if triton_scaled_mm > 0 else "")
-            .replace("HEXCUTE_SCALED_MM", f"{hexcute_scaled_mm:.2f}" if hexcute_scaled_mm > 0 else "")
-            .replace("TRITON_WS_GEMM", f"{triton_ws_gemm:.2f}" if triton_ws_gemm > 0 else "")
-            .replace("HEXCUTE_WS_GEMM", f"{hexcute_ws_gemm:.2f}" if hexcute_ws_gemm > 0 else "")
-            .replace("TRITON_FLASH3", f"{triton_flash3:.2f}" if triton_flash3 > 0 else "")
-            .replace("HEXCUTE_FLASH3", f"{hexcute_flash3:.2f}" if hexcute_flash3 > 0 else "")
+            table_template.replace("TRITON_GEMM", f"{triton_gemm:.2f}" if triton_gemm > 0 else "na")
+            .replace("HEXCUTE_GEMM", f"{hexcute_gemm:.2f}" if hexcute_gemm > 0 else "na")
+            .replace("TRITON_ATTN", f"{triton_attn:.2f}" if triton_attn > 0 else "na")
+            .replace("HEXCUTE_ATTN", f"{hexcute_attn:.2f}" if hexcute_attn > 0 else "na")
+            .replace("TRITON_DECODING", f"{triton_decoding:.2f}" if triton_decoding > 0 else "na")
+            .replace("HEXCUTE_DECODING", f"{hexcute_decoding:.2f}" if hexcute_decoding > 0 else "na")
+            .replace("TRITON_SCALED_MM", f"{triton_scaled_mm:.2f}" if triton_scaled_mm > 0 else "na")
+            .replace("HEXCUTE_SCALED_MM", f"{hexcute_scaled_mm:.2f}" if hexcute_scaled_mm > 0 else "na")
+            .replace("TRITON_WS_GEMM", f"{triton_ws_gemm:.2f}" if triton_ws_gemm > 0 else "na")
+            .replace("HEXCUTE_WS_GEMM", f"{hexcute_ws_gemm:.2f}" if hexcute_ws_gemm > 0 else "na")
+            .replace("TRITON_FLASH3", f"{triton_flash3:.2f}" if triton_flash3 > 0 else "na")
+            .replace("HEXCUTE_FLASH3", f"{hexcute_flash3:.2f}" if hexcute_flash3 > 0 else "na")
         )
 
 if __name__ == "__main__":
