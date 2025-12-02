@@ -43,26 +43,55 @@ def compute_geomean(triton, cuda, hexcute):
 
 
 def main():
-    _, _, _, _, flops_triton_ws_gemm, flops_cublas_ws_gemm, flops_hexcute_ws_gemm = markdown_table_to_dicts("warp_specialized_gemm_expt.txt")
-    _, _, _, _, flops_triton_scaled_mm, flops_cutlass_scaled_mm, flops_hexcute_scaled_mm = markdown_table_to_dicts("w8a8_scaled_mm.txt")
-    _, _, _, _, _, _, hexcute_flash3, triton_flash3, flashattn_3 = markdown_table_to_dicts("attention_flash3.txt")
-    _, _, _, _, flops_cublas_gemm, flops_triton_gemm, flops_hexcute_gemm = markdown_table_to_dicts("matmul_a100.txt")
-    _, _, _, _, _, _, _, _, _, _, bw_hexcute, bw_flash_attn, bw_flash_infer, bw_triton = markdown_table_to_dicts("decoding_a100.txt")
-    _, _, _, _, _, _, hexcute_attn, triton_attn, flashattn_attn = markdown_table_to_dicts("attn_forward.txt")
+    import os
+    if os.path.exists("warp_specialized_gemm_expt.txt"):
+        _, _, _, _, flops_triton_ws_gemm, flops_cublas_ws_gemm, flops_hexcute_ws_gemm = markdown_table_to_dicts("warp_specialized_gemm_expt.txt")
+        triton_ws_gemm, hexcute_ws_gemm = compute_geomean(flops_triton_ws_gemm, flops_cublas_ws_gemm, flops_hexcute_ws_gemm)
+    else:
+        triton_ws_gemm = 0
+        hexcute_ws_gemm = 0
+    
+    if os.path.exists("w8a8_scaled_mm.txt"):
+        _, _, _, _, flops_triton_scaled_mm, flops_cutlass_scaled_mm, flops_hexcute_scaled_mm = markdown_table_to_dicts("w8a8_scaled_mm.txt")
+        triton_scaled_mm, hexcute_scaled_mm = compute_geomean(flops_triton_scaled_mm, flops_cutlass_scaled_mm, flops_hexcute_scaled_mm)
+    else:
+        triton_scaled_mm = 0
+        hexcute_scaled_mm = 0
+    
+    if os.path.exists("attention_flash3.txt"):
+        _, _, _, _, _, _, hexcute_flash3, triton_flash3, flashattn_3 = markdown_table_to_dicts("attention_flash3.txt")
+        hexcute_flash3 = [1 / float(x) for x in hexcute_flash3]
+        triton_flash3 = [1 / float(x) for x in triton_flash3]
+        flashattn_3 = [1 / float(x) for x in flashattn_3]
+        triton_flash3, hexcute_flash3 = compute_geomean(triton_flash3, flashattn_3, hexcute_flash3)
+    else:
+        triton_flash3 = 0
+        hexcute_flash3 = 0
+    
+    if os.path.exists("matmul_a100.txt"):
+        _, _, _, _, flops_cublas_gemm, flops_triton_gemm, flops_hexcute_gemm = markdown_table_to_dicts("matmul_a100.txt")
+        triton_gemm, hexcute_gemm = compute_geomean(flops_triton_gemm, flops_cublas_gemm, flops_hexcute_gemm)
+    else:
+        triton_gemm = 0
+        hexcute_gemm = 0
+    
+    if os.path.exists("decoding_a100.txt"):
+        _, _, _, _, _, _, bw_hexcute, bw_flash_attn, bw_flash_infer, bw_triton = markdown_table_to_dicts("decoding_a100.txt")
+        triton_decoding, hexcute_decoding = compute_geomean(bw_triton, bw_flash_infer, bw_hexcute)
+    else:
+        triton_decoding = 0
+        hexcute_decoding = 0
+    
+    if os.path.exists("attn_forward.txt"):
+        _, _, _, _, _, _, hexcute_attn, triton_attn, flashattn_attn = markdown_table_to_dicts("attn_forward.txt")
+        hexcute_attn = [1 / float(x) for x in hexcute_attn]
+        triton_attn = [1 / float(x) for x in triton_attn]
+        flashattn_attn = [1 / float(x) for x in flashattn_attn]
+        triton_attn, hexcute_attn = compute_geomean(triton_attn, flashattn_attn, hexcute_attn)
+    else:
+        triton_attn = 0
+        hexcute_attn = 0
 
-    hexcute_flash3 = [1 / float(x) for x in hexcute_flash3]
-    triton_flash3 = [1 / float(x) for x in triton_flash3]
-    flashattn_3 = [1 / float(x) for x in flashattn_3]
-    hexcute_attn = [1 / float(x) for x in hexcute_attn]
-    triton_attn = [1 / float(x) for x in triton_attn]
-    flashattn_attn = [1 / float(x) for x in flashattn_attn]
-
-    triton_ws_gemm, hexcute_ws_gemm = compute_geomean(flops_triton_ws_gemm, flops_cublas_ws_gemm, flops_hexcute_ws_gemm)
-    triton_scaled_mm, hexcute_scaled_mm = compute_geomean(flops_triton_scaled_mm, flops_cutlass_scaled_mm, flops_hexcute_scaled_mm)
-    triton_flash3, hexcute_flash3 = compute_geomean(triton_flash3, flashattn_3, hexcute_flash3)
-    triton_gemm, hexcute_gemm = compute_geomean(flops_triton_gemm, flops_cublas_gemm, flops_hexcute_gemm)
-    triton_attn, hexcute_attn = compute_geomean(triton_attn, flashattn_attn, hexcute_attn)
-    triton_decoding, hexcute_decoding = compute_geomean(bw_triton, bw_flash_infer, bw_hexcute)
 
     table_template = r"""
 \documentclass[10pt,a4paper]{article}
@@ -80,7 +109,7 @@ def main():
  & & & \textbf{CUDA}& \textbf{Triton}& \textbf{Hexcute}& &\textbf{Triton}& \textbf{Hexcute}
 \\
 \hline
-\multirowcell{4}{NVIDIA\\ A100 GPU} & FP16 GEMM&40& 703$^\mathrm{b}$ & 71 & 98 & cuBLAS & TRITON_GEMM$\times$ & \textbf{HEXCUTE_GEMM$\times$} &  \\
+\multirowcell{3}{NVIDIA\\ A100 GPU} & FP16 GEMM&40& 703$^\mathrm{b}$ & 71 & 98 & cuBLAS & TRITON_GEMM$\times$ & \textbf{HEXCUTE_GEMM$\times$} &  \\
 & Fused MHA$^\mathrm{a}$ Forward&20& 577 & 114 & 172 & FlashAttention2 & TRITON_ATTN$\times$ & \textbf{HEXCUTE_ATTN$\times$} \\
 & Fused MHA Decoding&24& 322 & 224 & 253 & FlashInfer & TRITON_DECODING$\times$ & \textbf{HEXCUTE_DECODING$\times$} \\
 \hline
@@ -103,18 +132,18 @@ def main():
 """
     with open("Table_II.tex", "w") as f:
         f.write(
-            table_template.replace("TRITON_GEMM", f"{triton_gemm:.2f}")
-            .replace("HEXCUTE_GEMM", f"{hexcute_gemm:.2f}")
-            .replace("TRITON_ATTN", f"{triton_attn:.2f}")
-            .replace("HEXCUTE_ATTN", f"{hexcute_attn:.2f}")
-            .replace("TRITON_DECODING", f"{triton_decoding:.2f}")
-            .replace("HEXCUTE_DECODING", f"{hexcute_decoding:.2f}")
-            .replace("TRITON_SCALED_MM", f"{triton_scaled_mm:.2f}")
-            .replace("HEXCUTE_SCALED_MM", f"{hexcute_scaled_mm:.2f}")
-            .replace("TRITON_WS_GEMM", f"{triton_ws_gemm:.2f}")
-            .replace("HEXCUTE_WS_GEMM", f"{hexcute_ws_gemm:.2f}")
-            .replace("TRITON_FLASH3", f"{triton_flash3:.2f}")
-            .replace("HEXCUTE_FLASH3", f"{hexcute_flash3:.2f}")
+            table_template.replace("TRITON_GEMM", f"{triton_gemm:.2f}" if triton_gemm > 0 else "")
+            .replace("HEXCUTE_GEMM", f"{hexcute_gemm:.2f}" if hexcute_gemm > 0 else "")
+            .replace("TRITON_ATTN", f"{triton_attn:.2f}" if triton_attn > 0 else "")
+            .replace("HEXCUTE_ATTN", f"{hexcute_attn:.2f}" if hexcute_attn > 0 else "")
+            .replace("TRITON_DECODING", f"{triton_decoding:.2f}" if triton_decoding > 0 else "")
+            .replace("HEXCUTE_DECODING", f"{hexcute_decoding:.2f}" if hexcute_decoding > 0 else "")
+            .replace("TRITON_SCALED_MM", f"{triton_scaled_mm:.2f}" if triton_scaled_mm > 0 else "")
+            .replace("HEXCUTE_SCALED_MM", f"{hexcute_scaled_mm:.2f}" if hexcute_scaled_mm > 0 else "")
+            .replace("TRITON_WS_GEMM", f"{triton_ws_gemm:.2f}" if triton_ws_gemm > 0 else "")
+            .replace("HEXCUTE_WS_GEMM", f"{hexcute_ws_gemm:.2f}" if hexcute_ws_gemm > 0 else "")
+            .replace("TRITON_FLASH3", f"{triton_flash3:.2f}" if triton_flash3 > 0 else "")
+            .replace("HEXCUTE_FLASH3", f"{hexcute_flash3:.2f}" if hexcute_flash3 > 0 else "")
         )
 
 if __name__ == "__main__":
