@@ -752,6 +752,12 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     artifacts = flash_attention_v2_fwd(
         batch_size, seqlen_q, num_heads, head_size, seqlen_k, num_heads_k, sm_ver
     )
+    from flash_attn.flash_attn_interface import flash_attn_func
+    try:
+        from flash_attn_interface import flash_attn_func as fa3_flash_attn_func
+    except ImportError:
+        raise ImportError("flash attention 3 is not installed successfully, please double-check")
+     
     q, k, v, o = data(
         batch_size,
         seqlen_q,
@@ -781,7 +787,7 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
 
         def fn():
             func(q, k, v, o)
-        mean = do_bench(fn, percentiles=None)
+        mean = do_bench(fn, percentiles=None, flush_l2_cache=True)
 
         flops = 2.0 * (
             batch_size * seqlen_q * num_heads * seqlen_k * head_size
@@ -819,8 +825,6 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     func = best_func
     func(q, k, v, o)
 
-    from flash_attn.flash_attn_interface import flash_attn_func
-
     q = q.torch()
     k = k.torch()
     v = v.torch()
@@ -836,7 +840,7 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     def fn():
         flash_attn_func(q, k, v, causal=False)
 
-    mean = do_bench(fn, percentiles=None)
+    mean = do_bench(fn, percentiles=None, flush_l2_cache=True)
     mean_flash_atten = mean
     flops = 2.0 * (
         batch_size * seqlen_q * num_heads * seqlen_k * head_size
@@ -863,7 +867,7 @@ def main(batch_sizes: int, num_heads: int, num_heads_k: int, head_size: int, seq
     out_triton = fn3()
     out_triton = out_triton.permute(0, 2, 1, 3)
 
-    mean = do_bench(fn3, percentiles=None)
+    mean = do_bench(fn3, percentiles=None, flush_l2_cache=True)
     mean_triton = mean
     print("triton: time={:.3f} ms, performance={:.3f} TFLOPS".format(mean, flops / (1e9 * mean)))
     print("triton: time={:.3f} ms, bandwidth={:.3f} GB/s".format(mean, memory / (1e6 * mean)))
@@ -1057,4 +1061,4 @@ if __name__ == "__main__":
             wspace=0.2
         )
     # Adjust layout to prevent clipping of tick-labels
-    plt.savefig(args.output.replace(".txt", ".pdf"), dpi=300, bbox_inches="tight")
+    plt.savefig(args.output.replace(".txt", ".png"), dpi=300, format='png', bbox_inches="tight")

@@ -45,6 +45,7 @@ from hidet.ir.cute.ops import (
     inclusive_scan,
 )
 
+from hidet.cuda.device import properties
 from hidet.ir.cute.contexts import warp_groups_producer, warp_groups_consumer
 from hidet.utils.benchmark import do_bench
 
@@ -132,6 +133,8 @@ class SelectiveScanFn:
         self.delta_softplus = delta_softplus
         self.max_batch_size = max_batch_size
         self.update_ssm_state = update_ssm_state
+        prop = properties()
+        self.max_smem_bytes = prop.sharedMemPerMultiprocessor
         self.compiled_function = None
         self._compile()
 
@@ -556,6 +559,10 @@ class SelectiveScanFn:
         tv_atom = ThrValAtom("thread_block", (block_d, block_n, block_l), thread_value_layout)
         tiled_layout = TiledTensorLayout(tv_atom)
         max_batch_size = self.max_batch_size
+        estimated_smem_bytes = block_d * block_n * f32.nbytes \
+                + block_d * block_l * sP * input_t.nbytes * 3 \
+                + block_n * block_l * sP * input_t.nbytes * 2
+        tune.check(estimated_smem_bytes <= self.max_smem_bytes)
 
         with hidet.script_module() as script_module:
 
