@@ -1067,6 +1067,12 @@ if __name__ == "__main__":
     parser.add_argument("--debug", "-d", action="store_true", help="whether enabling debug mode or not")
     parser.add_argument("--output", "-o", type=str, default=None, help="output txt")
 
+    from hidet.cude.device import compute_capability
+    major, minor = compute_capability()
+    if major < 9:
+        raise RuntimeError("Compute capability must be at least 9.0")
+        exit()
+        
     #hidet.option.num_local_workers(1)
     args = parser.parse_args()
     if args.cache_dir is not None:
